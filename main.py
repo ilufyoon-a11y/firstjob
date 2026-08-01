@@ -99,12 +99,12 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(" No hay datos aún. ¡A trabajar!")
         return
 
-    mensaje = " **TOP DE COMPTES** \n\n"
+    mensaje = "<b>TOP DE COMPTES</b>\n\n"
     for i, (nombre, puntos) in enumerate(ranking, 1):
         medalla = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        mensaje += f"{medalla} **{nombre}**: {puntos} veces\n"
+        mensaje += f"{medalla} <b>{nombre}</b>: {puntos} veces\n"
 
-    await update.message.reply_text(mensaje, parse_mode="Markdown")
+    await update.message.reply_text(mensaje, parse_mode="HTML")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -124,7 +124,7 @@ async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nueva_palabra = context.args[0].lower()
     config["keyword"] = nueva_palabra
-    await update.message.reply_text(f" Palabra de clave cambiada a: **{nueva_palabra}**", parse_mode="Markdown")
+    await update.message.reply_text(f" Palabra de clave cambiada a: <b>{nueva_palabra}</b>", parse_mode="HTML")
 
 async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = " ".join(context.args) if context.args else "alguien"
