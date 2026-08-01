@@ -74,7 +74,7 @@ def _reset_stats():
     conn.close()
 
 # --- CONFIGURACIÓN ---
-ADMIN_IDS = (7740467368, 6905064136)  # tus IDs de administrador
+ADMIN_ID = 7740467368  # tu ID de administrador
 
 config = {"keyword": "compte"}
 
@@ -107,14 +107,14 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(mensaje, parse_mode="HTML")
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(" Solo el admin puede reiniciar el contador.")
         return
     _reset_stats()
     await update.message.reply_text(" Contador reiniciado a cero.")
 
 async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
+    if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text(" Solo el admin puede cambiar la palabra clave.")
         return
 
