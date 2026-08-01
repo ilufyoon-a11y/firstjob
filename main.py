@@ -1,6 +1,7 @@
 import os
 import random
 import logging
+import psycopg2
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -20,11 +21,61 @@ def run_web():
 
 Thread(target=run_web).start()
 
+# --- BASE DE DATOS (Supabase / Postgres) ---
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def _get_conn():
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+def _init_db():
+    """Crea la tabla si no existe."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            user_id TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL,
+            puntos INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def _sumar_punto(user_id: str, nombre: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO stats (user_id, nombre, puntos)
+        VALUES (%s, %s, 1)
+        ON CONFLICT (user_id)
+        DO UPDATE SET puntos = stats.puntos + 1, nombre = EXCLUDED.nombre;
+    """, (user_id, nombre))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def _obtener_top(limite: int = 10):
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT nombre, puntos FROM stats ORDER BY puntos DESC LIMIT %s;", (limite,))
+    resultados = cur.fetchall()
+    cur.close()
+    conn.close()
+    return resultados
+
+def _reset_stats():
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM stats;")
+    conn.commit()
+    cur.close()
+    conn.close()
+
 # --- CONFIGURACIÓN ---
 ADMIN_IDS = (7740467368, 6905064136)  # tus IDs de administrador
 
-# Variables globales
-stats = {}
 config = {"keyword": "compte"}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -43,15 +94,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(menu, parse_mode="Markdown")
 
 async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not stats:
+    ranking = _obtener_top(10)
+    if not ranking:
         await update.message.reply_text(" No hay datos aún. ¡A trabajar!")
         return
 
-    ranking = sorted(stats.items(), key=lambda x: x[1]["puntos"], reverse=True)
     mensaje = " **TOP DE COMPTES** \n\n"
-    for i, (user_id, datos) in enumerate(ranking[:10], 1):
+    for i, (nombre, puntos) in enumerate(ranking, 1):
         medalla = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        mensaje += f"{medalla} **{datos['nombre']}**: {datos['puntos']} veces\n"
+        mensaje += f"{medalla} **{nombre}**: {puntos} veces\n"
 
     await update.message.reply_text(mensaje, parse_mode="Markdown")
 
@@ -59,8 +110,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text(" Solo el admin puede reiniciar el contador.")
         return
-    global stats
-    stats = {}
+    _reset_stats()
     await update.message.reply_text(" Contador reiniciado a cero.")
 
 async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,11 +151,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if config["keyword"] in texto:
         user_id = str(update.effective_user.id)
         nombre = update.effective_user.first_name
-
-        if user_id not in stats:
-            stats[user_id] = {"nombre": nombre, "puntos": 0}
-
-        stats[user_id]["puntos"] += 1
+        _sumar_punto(user_id, nombre)
         print(f"Registro: {nombre} dijo {config['keyword']}")
 
 # --- MAIN ---
@@ -113,6 +159,11 @@ if __name__ == '__main__':
     token_bot = os.environ.get('TOKEN')
     if not token_bot:
         raise ValueError("No configuraste bien el TOKEN hijita, porfavor")
+    if not DATABASE_URL:
+        raise ValueError("No configuraste bien el DATABASE_URL hijita, porfavor")
+
+    print("🗄️ Verificando base de datos...")
+    _init_db()
 
     print("🤖 Iniciando bot de Telegram con run_polling...")
     application = ApplicationBuilder().token(token_bot).build()
