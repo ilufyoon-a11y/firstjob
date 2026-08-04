@@ -183,10 +183,10 @@ def _obtener_historial_mes(anio: int, mes: int):
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha, COALESCE(username, nombre) AS persona, SUM(duracion_segundos) AS total
+        SELECT fecha, nombre, SUM(duracion_segundos) AS total
         FROM sesiones
         WHERE EXTRACT(YEAR FROM fecha) = %s AND EXTRACT(MONTH FROM fecha) = %s
-        GROUP BY fecha, COALESCE(username, nombre)
+        GROUP BY fecha, nombre
         ORDER BY fecha ASC, total DESC;
     """, (anio, mes))
     resultados = cur.fetchall()
@@ -194,16 +194,17 @@ def _obtener_historial_mes(anio: int, mes: int):
     conn.close()
     return resultados
 
-def _obtener_historial_mes(anio: int, mes: int):
+def _obtener_historial(user_id: str, dias: int = 14):
+    """Historial de los últimos N días para un usuario específico."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha, nombre, SUM(duracion_segundos) AS total
+        SELECT fecha, SUM(duracion_segundos) AS total, MAX(nombre) AS nombre
         FROM sesiones
-        WHERE EXTRACT(YEAR FROM fecha) = %s AND EXTRACT(MONTH FROM fecha) = %s
-        GROUP BY fecha, nombre
-        ORDER BY fecha ASC, total DESC;
-    """, (anio, mes))
+        WHERE user_id = %s AND fecha >= (CURRENT_DATE - %s * INTERVAL '1 day')
+        GROUP BY fecha
+        ORDER BY fecha DESC;
+    """, (user_id, dias))
     resultados = cur.fetchall()
     cur.close()
     conn.close()
