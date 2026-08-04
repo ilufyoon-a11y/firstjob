@@ -507,7 +507,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         segundos = _cerrar_sesion(user_id, nombre, username)
         if segundos is not None:
             await update.message.reply_text(
-                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activo</b>",
+                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activa(o)</b>",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
