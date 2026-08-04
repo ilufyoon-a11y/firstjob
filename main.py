@@ -179,17 +179,16 @@ def _resolver_user_id_por_username(username: str):
     conn.close()
     return fila[0] if fila else None
 
-def _obtener_historial(user_id: str, limite: int = 14):
+def _obtener_historial_mes(anio: int, mes: int):
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha, SUM(duracion_segundos) AS total, MAX(nombre) AS nombre
+        SELECT fecha, COALESCE(username, nombre) AS persona, SUM(duracion_segundos) AS total
         FROM sesiones
-        WHERE user_id = %s
-        GROUP BY fecha
-        ORDER BY fecha DESC
-        LIMIT %s;
-    """, (user_id, limite))
+        WHERE EXTRACT(YEAR FROM fecha) = %s AND EXTRACT(MONTH FROM fecha) = %s
+        GROUP BY fecha, COALESCE(username, nombre)
+        ORDER BY fecha ASC, total DESC;
+    """, (anio, mes))
     resultados = cur.fetchall()
     cur.close()
     conn.close()
@@ -261,7 +260,7 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         objetivo_id = _resolver_user_id_por_username(context.args[0])
         if not objetivo_id:
             await update.message.reply_text(
-                " No encontré a ese usuario. Solo puedo buscar a alguien que ya haya dicho la palabra clave al menos una vez."
+                " Aun no hay actividad registrada por parte de esta(e) admin..."
             )
             return
     else:
@@ -269,14 +268,14 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     filas = _obtener_historial(objetivo_id, 14)
     if not filas:
-        await update.message.reply_text(" No hay tiempo registrado todavía para ese usuario.")
+        await update.message.reply_text(" Aun no hay actividad registrada por parte de esta(e) admin...")
         return
 
     nombre_mostrado = filas[0][2]
     mensaje = f" <b>Historial de {nombre_mostrado}</b>\n\n"
     for fecha, total_segundos, _nombre in filas:
         dia_semana = DIAS_ES[fecha.weekday()]
-        mensaje += f"• {dia_semana} {fecha.strftime('%d/%m')}: {_formatear_duracion(int(total_segundos))}\n"
+        mensaje += f"─ {dia_semana} {fecha.strftime('%d/%m')} → {_formatear_duracion(int(total_segundos))}\n"
 
     await update.message.reply_text(mensaje, parse_mode="HTML")
 
@@ -349,7 +348,6 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
 
     elementos = [
         Paragraph("Reporte de Actividad", estilo_titulo),
-        Paragraph(f"{MESES_ES[mes]} {anio}", estilo_subtitulo),
         Spacer(1, 20),
     ]
 
@@ -358,7 +356,7 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     resumen_ordenado = sorted(totales_persona.items(), key=lambda x: x[1], reverse=True)
     for nombre, seg in resumen_ordenado:
         color_fondo = _color_persona(nombre, nombres_ordenados)
-        elementos.append(_pill(nombre, _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
+        elementos.append(_pill(f"@{nombre}", _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
         elementos.append(Spacer(1, 6))
 
     total_general = sum(totales_persona.values())
@@ -387,7 +385,7 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
         total_dia = 0
         for nombre, seg in por_dia[fecha]:
             color_fondo = _color_persona(nombre, nombres_ordenados)
-            elementos.append(_pill(nombre, _formatear_duracion(seg), color_fondo, TEXTO_PDF))
+            elementos.append(_pill(f"@{nombre}", _formatear_duracion(seg), color_fondo, TEXTO_PDF))
             elementos.append(Spacer(1, 4))
             total_dia += seg
 
@@ -413,23 +411,23 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 mes = int(context.args[0])
         except ValueError:
-            await update.message.reply_text("Uso: <code>/reporte</code> (mes actual) o <code>/reporte 7 2026</code> (mes/año específico)", parse_mode="HTML")
+            await update.message.reply_text("Uso: <code>/reporte</code> (mes actual)", parse_mode="HTML")
             return
 
     filas = _obtener_historial_mes(anio, mes)
     if not filas:
-        await update.message.reply_text(f" No hay tiempo registrado en {MESES_ES[mes]} {anio}.")
+        await update.message.reply_text(f" No hay actividad registrada de este mes en la base de datos.")
         return
 
-    await update.message.reply_text(f" Generando el PDF de {MESES_ES[mes]} {anio}, un momento...")
+    await update.message.reply_text(f"Generando el reporte de {MESES_ES[mes]}, esto tardará unos segundos...")
     ruta_pdf = _generar_pdf_general(filas, anio, mes)
 
     try:
         with open(ruta_pdf, "rb") as archivo:
             await update.message.reply_document(
                 document=archivo,
-                filename=f"reporte_{MESES_ES[mes].lower()}_{anio}.pdf",
-                caption=f" Reporte de actividad — {MESES_ES[mes]} {anio}"
+                filename=f"reporte_{MESES_ES[mes].lower()}.pdf",
+                caption=f" Reporte de actividad — {MESES_ES[mes]}"
             )
     finally:
         if os.path.exists(ruta_pdf):
@@ -489,7 +487,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         segundos = _cerrar_sesion(user_id, nombre, username)
         if segundos is not None:
             await update.message.reply_text(
-                f" ⏱️ Estuviste activo por: <b>{_formatear_duracion(segundos)}</b>",
+                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activo</b>",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
