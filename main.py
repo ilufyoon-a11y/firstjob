@@ -184,7 +184,7 @@ def _obtener_historial_mes(anio: int, mes: int):
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha, nombre, SUM(duracion_segundos) AS total
+        SELECT fecha, nombre, MAX(username) AS username, SUM(duracion_segundos) AS total
         FROM sesiones
         WHERE EXTRACT(YEAR FROM fecha) = %s AND EXTRACT(MONTH FROM fecha) = %s
         GROUP BY fecha, nombre
@@ -332,13 +332,16 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     por_dia = {}
     orden_dias = []
     totales_persona = {}
-    for fecha, nombre, total_segundos in filas:
+    etiquetas_persona = {}
+    for fecha, nombre, username, total_segundos in filas:
         nombre = _sanitizar_texto_pdf(nombre)
+        etiqueta = f"@{_sanitizar_texto_pdf(username)}" if username else nombre
         if fecha not in por_dia:
             por_dia[fecha] = []
             orden_dias.append(fecha)
-        por_dia[fecha].append((nombre, int(total_segundos)))
+        por_dia[fecha].append((nombre, etiqueta, int(total_segundos)))
         totales_persona[nombre] = totales_persona.get(nombre, 0) + int(total_segundos)
+        etiquetas_persona[nombre] = etiqueta
 
     nombres_ordenados = sorted(totales_persona.keys())
 
@@ -369,7 +372,7 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     resumen_ordenado = sorted(totales_persona.items(), key=lambda x: x[1], reverse=True)
     for nombre, seg in resumen_ordenado:
         color_fondo = _color_persona(nombre, nombres_ordenados)
-        elementos.append(_pill(f"@{nombre}", _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
+        elementos.append(_pill(etiquetas_persona[nombre], _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
         elementos.append(Spacer(1, 6))
 
     total_general = sum(totales_persona.values())
@@ -396,9 +399,9 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
         elementos.append(Spacer(1, 5))
 
         total_dia = 0
-        for nombre, seg in por_dia[fecha]:
+        for nombre, etiqueta, seg in por_dia[fecha]:
             color_fondo = _color_persona(nombre, nombres_ordenados)
-            elementos.append(_pill(f"@{nombre}", _formatear_duracion(seg), color_fondo, TEXTO_PDF))
+            elementos.append(_pill(etiqueta, _formatear_duracion(seg), color_fondo, TEXTO_PDF))
             elementos.append(Spacer(1, 4))
             total_dia += seg
 
@@ -500,7 +503,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         segundos = _cerrar_sesion(user_id, nombre, username)
         if segundos is not None:
             await update.message.reply_text(
-                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activo</b>",
+                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activa(o)</b>",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
@@ -523,7 +526,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("inicio", help_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("top", show_top))
-    application.add_handler(CommandHandler("historial", historial))
+    application.add_handler(CommandHandler("bitacora", historial))
     application.add_handler(CommandHandler("reporte", general))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("setkeyword", set_keyword))
