@@ -43,8 +43,6 @@ TEXTO_PDF = colors.HexColor("#4A3F5C")
 PALETA_PERSONAS = [
     colors.HexColor("#F6EAF3"),  # rosa pastel
     colors.HexColor("#E4D6E9"),  # lila claro
-    colors.HexColor("#CDC7E3"),  # lavanda
-    colors.HexColor("#B4A9D2"),  # morado medio
     colors.HexColor("#D7CEDB"),  # gris lavanda
     colors.HexColor("#EFDAF6"),  # orquídea claro
 ]
