@@ -36,10 +36,10 @@ MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 # --- PALETA PASTEL PARA EL PDF ---
-CREMA = colors.HexColor("#FFFBF5")
-MAUVE = colors.HexColor("#B9808F")
-MAUVE_OSCURO = colors.HexColor("#8C5C6B")
-TEXTO_PDF = colors.HexColor("#5A4048")
+CREMA = colors.HexColor("#FAF6FC")
+MAUVE = colors.HexColor("#B4A9D2")
+MAUVE_OSCURO = colors.HexColor("#6C5B7B")
+TEXTO_PDF = colors.HexColor("#4A3F5C")
 PALETA_PERSONAS = [
     colors.HexColor("#F6EAF3"),  # rosa pastel
     colors.HexColor("#E4D6E9"),  # lila claro
