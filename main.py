@@ -2,6 +2,7 @@ import os
 import random
 import logging
 import psycopg2
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -210,6 +211,16 @@ def _obtener_historial(user_id: str, dias: int = 14):
     conn.close()
     return resultados
 
+def _sanitizar_texto_pdf(texto: str) -> str:
+    """Convierte caracteres unicode 'decorados' (como los estilos matemáticos
+    tipo 𝖬𝗎𝖾𝗌𝗍𝗋𝖺) a su letra normal, y descarta lo que no se pueda dibujar
+    con las fuentes base de reportlab (emojis, símbolos raros), para
+    evitar los cuadraditos."""
+    if not texto:
+        return texto
+    normalizado = unicodedata.normalize('NFKC', texto)
+    return normalizado.encode('latin-1', 'ignore').decode('latin-1')
+
 def _formatear_duracion(segundos: int) -> str:
     horas = segundos // 3600
     minutos = (segundos % 3600) // 60
@@ -322,6 +333,7 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     orden_dias = []
     totales_persona = {}
     for fecha, nombre, total_segundos in filas:
+        nombre = _sanitizar_texto_pdf(nombre)
         if fecha not in por_dia:
             por_dia[fecha] = []
             orden_dias.append(fecha)
