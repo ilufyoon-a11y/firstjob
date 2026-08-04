@@ -41,10 +41,6 @@ MAUVE = colors.HexColor("#B9808F")
 MAUVE_OSCURO = colors.HexColor("#8C5C6B")
 TEXTO_PDF = colors.HexColor("#5A4048")
 PALETA_PERSONAS = [
-    colors.HexColor("#F6C9D0"),  # rosa
-    colors.HexColor("#FBE7B2"),  # amarillo suave
-    colors.HexColor("#D9C9F0"),  # lavanda
-    colors.HexColor("#C9E4DE"),  # menta
     colors.HexColor("#F5D6BA"),  # durazno
 ]
 
@@ -336,12 +332,15 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     for fecha, nombre, username, total_segundos in filas:
         nombre = _sanitizar_texto_pdf(nombre)
         etiqueta = f"@{_sanitizar_texto_pdf(username)}" if username else nombre
+        # Agrupamos por username (estable) y no por nombre (cambia seguido),
+        # para que la misma persona no salga repetida en el resumen.
+        clave = username.lower() if username else nombre
         if fecha not in por_dia:
             por_dia[fecha] = []
             orden_dias.append(fecha)
-        por_dia[fecha].append((nombre, etiqueta, int(total_segundos)))
-        totales_persona[nombre] = totales_persona.get(nombre, 0) + int(total_segundos)
-        etiquetas_persona[nombre] = etiqueta
+        por_dia[fecha].append((clave, etiqueta, int(total_segundos)))
+        totales_persona[clave] = totales_persona.get(clave, 0) + int(total_segundos)
+        etiquetas_persona[clave] = etiqueta
 
     nombres_ordenados = sorted(totales_persona.keys())
 
@@ -370,9 +369,9 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
     # --- RESUMEN DEL MES ---
     elementos.append(Paragraph("RESUMEN DEL MES", estilo_seccion))
     resumen_ordenado = sorted(totales_persona.items(), key=lambda x: x[1], reverse=True)
-    for nombre, seg in resumen_ordenado:
-        color_fondo = _color_persona(nombre, nombres_ordenados)
-        elementos.append(_pill(etiquetas_persona[nombre], _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
+    for clave, seg in resumen_ordenado:
+        color_fondo = _color_persona(clave, nombres_ordenados)
+        elementos.append(_pill(etiquetas_persona[clave], _formatear_duracion(seg), color_fondo, TEXTO_PDF, negrita=True))
         elementos.append(Spacer(1, 6))
 
     total_general = sum(totales_persona.values())
@@ -399,8 +398,8 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
         elementos.append(Spacer(1, 5))
 
         total_dia = 0
-        for nombre, etiqueta, seg in por_dia[fecha]:
-            color_fondo = _color_persona(nombre, nombres_ordenados)
+        for clave, etiqueta, seg in por_dia[fecha]:
+            color_fondo = _color_persona(clave, nombres_ordenados)
             elementos.append(_pill(etiqueta, _formatear_duracion(seg), color_fondo, TEXTO_PDF))
             elementos.append(Spacer(1, 4))
             total_dia += seg
@@ -503,7 +502,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         segundos = _cerrar_sesion(user_id, nombre, username)
         if segundos is not None:
             await update.message.reply_text(
-                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activa(o)</b>",
+                f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activo</b>",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
