@@ -41,7 +41,12 @@ MAUVE = colors.HexColor("#B9808F")
 MAUVE_OSCURO = colors.HexColor("#8C5C6B")
 TEXTO_PDF = colors.HexColor("#5A4048")
 PALETA_PERSONAS = [
-    colors.HexColor("#F5D6BA"),  # durazno
+    colors.HexColor("#F6EAF3"),  # rosa pastel
+    colors.HexColor("#E4D6E9"),  # lila claro
+    colors.HexColor("#CDC7E3"),  # lavanda
+    colors.HexColor("#B4A9D2"),  # morado medio
+    colors.HexColor("#D7CEDB"),  # gris lavanda
+    colors.HexColor("#EFDAF6"),  # orquídea claro
 ]
 
 # --- BASE DE DATOS (Supabase / Postgres) ---
