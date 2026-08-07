@@ -122,16 +122,18 @@ def _reset_stats():
     conn.close()
 
 def _iniciar_sesion(user_id: str, nombre: str, username: str = None) -> bool:
-    """Guarda la hora de inicio. Si ya hay una sesión activa, la deja tal cual (no la reinicia)."""
+    """Guarda la hora de inicio. Si ya había una sesión activa sin cerrar (nunca dijo
+    'salgo'), la descarta y arranca el cronómetro de cero desde ahora."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO sesiones_activas (user_id, nombre, username, inicio)
         VALUES (%s, %s, %s, NOW())
-        ON CONFLICT (user_id) DO NOTHING
-        RETURNING user_id;
+        ON CONFLICT (user_id) DO UPDATE
+            SET inicio = NOW(), nombre = EXCLUDED.nombre, username = EXCLUDED.username
+        RETURNING (xmax = 0) AS fue_nueva;
     """, (user_id, nombre, username))
-    fue_nueva = cur.fetchone() is not None
+    fue_nueva = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()
