@@ -232,7 +232,8 @@ def _formatear_duracion(segundos: int) -> str:
     return f"{minutos}min"
 
 # --- CONFIGURACIÓN ---
-ADMIN_IDS = (7740467368, 6905064136)
+ADMIN_IDS = (7740467368, )
+#6905064136
 config = {"keyword": "compte", "keyword_salida": "salgo"}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
