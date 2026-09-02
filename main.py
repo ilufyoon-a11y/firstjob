@@ -434,6 +434,13 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ahora = datetime.now(ADMIN_TZ)
     anio, mes = ahora.year, ahora.month
+    if ahora.day < 3:
+        # El periodo (día 3 al 2) que contiene la fecha de hoy en realidad
+        # empezó el mes anterior, aunque el mes calendario ya haya cambiado.
+        if mes == 1:
+            anio, mes = anio - 1, 12
+        else:
+            mes -= 1
 
     if context.args:
         try:
