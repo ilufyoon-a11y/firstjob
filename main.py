@@ -447,13 +447,11 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     filas = _obtener_historial_mes(anio, mes)
-    inicio, fin = _rango_reporte(anio, mes)
-
     if not filas:
-        await update.message.reply_text(f" No hay actividad registrada en el periodo {rango_texto}.")
+        await update.message.reply_text(f" No hay actividad registrada de este mes en la base de datos.")
         return
 
-    await update.message.reply_text(f"Generando el reporte del {rango_texto}, esto tardará unos segundos...")
+    await update.message.reply_text(f"Generando el reporte de {MESES_ES[mes]}, esto tardará unos segundos...")
     ruta_pdf = _generar_pdf_general(filas, anio, mes)
 
     try:
@@ -461,6 +459,7 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(
                 document=archivo,
                 filename=f"reporte_{MESES_ES[mes].lower()}.pdf",
+                caption=f" Reporte de actividad — {MESES_ES[mes]}"
             )
     finally:
         if os.path.exists(ruta_pdf):
