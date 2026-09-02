@@ -3,7 +3,8 @@ import random
 import logging
 import psycopg2
 import unicodedata
-from datetime import datetime, timezone, timedelta, date
+import json
+from datetime import datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from reportlab.lib import colors
@@ -84,12 +85,52 @@ def _init_db():
             duracion_segundos INTEGER NOT NULL
         );
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            clave TEXT PRIMARY KEY,
+            valor TEXT NOT NULL
+        );
+    """)
     cur.execute("ALTER TABLE stats ADD COLUMN IF NOT EXISTS username TEXT;")
     cur.execute("ALTER TABLE sesiones_activas ADD COLUMN IF NOT EXISTS username TEXT;")
     cur.execute("ALTER TABLE sesiones ADD COLUMN IF NOT EXISTS username TEXT;")
     conn.commit()
     cur.close()
     conn.close()
+
+def _guardar_config(clave: str, valor: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO config (clave, valor) VALUES (%s, %s)
+        ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor;
+    """, (clave, valor))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def _cargar_config() -> dict:
+    """Carga la config guardada en la base de datos (keyword, mes del último
+    reset, etc). Si no hay nada (primera vez), usa los valores por defecto
+    y los guarda para la próxima, así sobrevive a reinicios del bot."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT clave, valor FROM config;")
+    filas = dict(cur.fetchall())
+    cur.close()
+    conn.close()
+
+    ahora = datetime.now(ADMIN_TZ)
+    resultado = {
+        "keyword": filas.get("keyword", "compte"),
+        "keyword_salida": filas.get("keyword_salida", "salgo"),
+        "reset_mes": filas.get("reset_mes", str(ahora.month)),
+        "reset_anio": filas.get("reset_anio", str(ahora.year)),
+    }
+    for clave in ("keyword", "keyword_salida", "reset_mes", "reset_anio"):
+        if clave not in filas:
+            _guardar_config(clave, resultado[clave])
+    return resultado
 
 def _sumar_punto(user_id: str, nombre: str, username: str = None):
     conn = _get_conn()
@@ -117,9 +158,61 @@ def _reset_stats():
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM stats;")
+    cur.execute("DELETE FROM sesiones;")
+    cur.execute("DELETE FROM sesiones_activas;")
     conn.commit()
     cur.close()
     conn.close()
+
+def _exportar_backup():
+    """Saca una copia completa de 'sesiones' y 'stats' en un dict serializable
+    a JSON, para poder restaurarlo después con _importar_backup si se resetea
+    todo por accidente."""
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, nombre, username, fecha, duracion_segundos FROM sesiones ORDER BY id;")
+    sesiones = [
+        {
+            "user_id": fila[0],
+            "nombre": fila[1],
+            "username": fila[2],
+            "fecha": fila[3].isoformat(),
+            "duracion_segundos": fila[4],
+        }
+        for fila in cur.fetchall()
+    ]
+    cur.execute("SELECT user_id, nombre, username, puntos FROM stats;")
+    stats = [
+        {"user_id": fila[0], "nombre": fila[1], "username": fila[2], "puntos": fila[3]}
+        for fila in cur.fetchall()
+    ]
+    cur.close()
+    conn.close()
+    return {"sesiones": sesiones, "stats": stats}
+
+def _importar_backup(data: dict) -> tuple:
+    """Restaura un backup generado por _exportar_backup. Es aditivo: no borra
+    nada de lo que ya haya, solo agrega las sesiones e suma los puntos."""
+    sesiones = data.get("sesiones", [])
+    stats = data.get("stats", [])
+    conn = _get_conn()
+    cur = conn.cursor()
+    for fila in sesiones:
+        cur.execute("""
+            INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos)
+            VALUES (%s, %s, %s, %s, %s);
+        """, (fila["user_id"], fila["nombre"], fila.get("username"), fila["fecha"], fila["duracion_segundos"]))
+    for fila in stats:
+        cur.execute("""
+            INSERT INTO stats (user_id, nombre, username, puntos)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET puntos = stats.puntos + EXCLUDED.puntos, nombre = EXCLUDED.nombre, username = EXCLUDED.username;
+        """, (fila["user_id"], fila["nombre"], fila.get("username"), fila["puntos"]))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(sesiones), len(stats)
 
 def _iniciar_sesion(user_id: str, nombre: str, username: str = None) -> bool:
     """Guarda la hora de inicio. Si ya había una sesión activa sin cerrar (nunca dijo
@@ -181,32 +274,23 @@ def _resolver_user_id_por_username(username: str):
     conn.close()
     return fila[0] if fila else None
 
-def _rango_reporte(anio: int, mes: int):
-    """Devuelve (inicio, fin) del periodo de reporte para un 'mes' dado:
-    del día 3 de ese mes hasta el día 2 del mes siguiente (ambos incluidos)."""
-    inicio = date(anio, mes, 3)
-    if mes == 12:
-        anio_siguiente, mes_siguiente = anio + 1, 1
-    else:
-        anio_siguiente, mes_siguiente = anio, mes + 1
-    fin = date(anio_siguiente, mes_siguiente, 2)
-    return inicio, fin
-
-def _obtener_historial_mes(anio: int, mes: int):
-    inicio, fin = _rango_reporte(anio, mes)
+def _obtener_historial_periodo_actual():
+    """Trae todo el historial acumulado desde el último /reset (como /reset
+    borra la tabla 'sesiones', todo lo que queda aquí pertenece al periodo
+    actual: desde ese reset hasta ahora)."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT fecha, nombre, MAX(username) AS username, SUM(duracion_segundos) AS total
         FROM sesiones
-        WHERE fecha >= %s AND fecha <= %s
         GROUP BY fecha, nombre
         ORDER BY fecha ASC, total DESC;
-    """, (inicio, fin))
+    """)
     resultados = cur.fetchall()
     cur.close()
     conn.close()
     return resultados
+
 
 def _obtener_historial(user_id: str, dias: int = 14):
     """Historial de los últimos N días para un usuario específico."""
@@ -245,7 +329,7 @@ def _formatear_duracion(segundos: int) -> str:
 
 # --- CONFIGURACIÓN ---
 ADMIN_IDS = (7740467368, 6905064136)
-config = {"keyword": "compte", "keyword_salida": "salgo"}
+config = {"keyword": "compte", "keyword_salida": "salgo", "reset_mes": None, "reset_anio": None}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -255,7 +339,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu = (
         " **Manual de Operaciones (Comandos)**\n\n"
         " `/top` -> 𝖬𝗎𝖾𝗌𝗍𝗋𝖺 𝖾𝗅 𝗍𝗈𝗉 𝖽𝖾 𝖺𝖼𝗍𝗂𝗏𝗂𝖽𝖺𝖽.\n"        
-        " `/reset` -> 𝖱𝖾𝗂𝗇𝗂𝖼𝗂𝖺 𝖾𝗅 𝖼𝗈𝗇𝗍𝖺𝖽𝗈𝗋 𝖽𝖾 𝗆𝖾𝗇𝗌𝖺𝗃𝖾𝗌.\n"        
+        " `/reset` -> 𝖱𝖾𝗂𝗇𝗂𝖼𝗂𝖺 𝖾𝗅 𝖼𝗈𝗇𝗍𝖺𝖽𝗈𝗋 (𝗍𝖾 𝗆𝖺𝗇𝖽𝖺 𝖾𝗅 𝖻𝖺𝖼𝗄𝗎𝗉 𝗉𝗈𝗋 𝖣𝖬 𝖺𝗇𝗍𝖾𝗌).\n"        
+        " `/export` -> 𝖳𝖾 𝗆𝖺𝗇𝖽𝖺 𝗎𝗇 𝖻𝖺𝖼𝗄𝗎𝗉 𝗉𝗈𝗋 𝖣𝖬 𝗌𝗂𝗇 𝗋𝖾𝗌𝖾𝗍𝖾𝖺𝗋.\n"
+        " `/restore` -> 𝖱𝖾𝗌𝗉𝗈𝗇𝖽𝗂𝖽𝗈 𝖺 𝗎𝗇 𝖻𝖺𝖼𝗄𝗎𝗉, 𝗅𝗈 𝗋𝖾𝗌𝗍𝖺𝗎𝗋𝖺.\n"
         " `/setkeyword <palabra>` -> 𝖢𝖺𝗆𝖻𝗂𝖺 𝗅𝖺 𝗉𝖺𝗅𝖺𝖻𝗋𝖺 𝖽𝖾 𝗏𝗂𝗀𝗂𝗅𝖺𝗇𝖼𝗂𝖺.\n"        
         " `/trabaja [@usuario]` -> 𝖬𝖾𝗇𝗌𝖺𝗃𝖾 𝖽𝖾 𝗌𝗈𝖻𝗋𝖾𝖾𝗑𝗉𝗅𝗈𝗍𝖺𝖼𝗂ó𝗇 𝖼𝗋𝖾𝖺𝗍𝗂𝗏𝖺.\n"        
         " `/help` -> 𝖬𝗎𝖾𝗌𝗍𝗋𝖺 𝖾𝗌𝗍𝖾 𝗆𝖾𝗇𝗌𝖺𝗃𝖾."    
@@ -338,9 +424,10 @@ def _pie_de_pagina(canvas, doc):
     canvas.drawRightString(letter[0] - 0.75 * inch, 0.45 * inch, f"Página {doc.page}")
     canvas.restoreState()
 
-def _generar_pdf_general(filas, anio: int, mes: int) -> str:
-    """Genera el PDF del reporte del mes (diseño pastel) y devuelve la ruta del archivo temporal."""
-    ruta = f"/tmp/reporte_{anio}_{mes:02d}_{int(datetime.now().timestamp())}.pdf"
+def _generar_pdf_general(filas, mes_titulo: str = None) -> str:
+    """Genera el PDF del reporte del periodo actual (desde el último /reset)
+    con diseño pastel, y devuelve la ruta del archivo temporal."""
+    ruta = f"/tmp/reporte_{int(datetime.now().timestamp())}.pdf"
 
     por_dia = {}
     orden_dias = []
@@ -380,11 +467,13 @@ def _generar_pdf_general(filas, anio: int, mes: int) -> str:
 
     elementos = [
         Paragraph("Reporte de Actividad", estilo_titulo),
-        Spacer(1, 20),
     ]
+    if mes_titulo:
+        elementos.append(Paragraph(mes_titulo, estilo_subtitulo))
+    elementos.append(Spacer(1, 20))
 
     # --- RESUMEN DEL MES ---
-    elementos.append(Paragraph("RESUMEN DEL MES", estilo_seccion))
+    elementos.append(Paragraph("RESUMEN DEL PERIODO", estilo_seccion))
     resumen_ordenado = sorted(totales_persona.items(), key=lambda x: x[1], reverse=True)
     for clave, seg in resumen_ordenado:
         color_fondo = _color_persona(clave, nombres_ordenados)
@@ -432,41 +521,22 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(" Solo el admin puede ver el reporte general.")
         return
 
-    ahora = datetime.now(ADMIN_TZ)
-    anio, mes = ahora.year, ahora.month
-    if ahora.day < 3:
-        # El periodo (día 3 al 2) que contiene la fecha de hoy en realidad
-        # empezó el mes anterior, aunque el mes calendario ya haya cambiado.
-        if mes == 1:
-            anio, mes = anio - 1, 12
-        else:
-            mes -= 1
-
-    if context.args:
-        try:
-            if len(context.args) >= 2:
-                mes = int(context.args[0])
-                anio = int(context.args[1])
-            else:
-                mes = int(context.args[0])
-        except ValueError:
-            await update.message.reply_text("Uso: <code>/reporte</code> (mes actual)", parse_mode="HTML")
-            return
-
-    filas = _obtener_historial_mes(anio, mes)
+    filas = _obtener_historial_periodo_actual()
     if not filas:
-        await update.message.reply_text(f" No hay actividad registrada de este mes en la base de datos.")
+        await update.message.reply_text(" No hay actividad registrada desde el último reset.")
         return
 
-    await update.message.reply_text(f"Generando el reporte de {MESES_ES[mes]}, esto tardará unos segundos...")
-    ruta_pdf = _generar_pdf_general(filas, anio, mes)
+    await update.message.reply_text("Generando el reporte del periodo actual, esto tardará unos segundos...")
+
+    mes_periodo = MESES_ES[int(config["reset_mes"])]
+    ruta_pdf = _generar_pdf_general(filas, mes_periodo)
 
     try:
         with open(ruta_pdf, "rb") as archivo:
             await update.message.reply_document(
                 document=archivo,
-                filename=f"reporte_{MESES_ES[mes].lower()}.pdf",
-                caption=f" Reporte de actividad — {MESES_ES[mes]}"
+                filename=f"reporte_{mes_periodo.lower()}.pdf",
+                caption=f" Reporte de actividad — {mes_periodo}"
             )
     finally:
         if os.path.exists(ruta_pdf):
@@ -476,8 +546,102 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text(" Solo el admin puede reiniciar el contador.")
         return
+
+    data = _exportar_backup()
+    if data["sesiones"] or data["stats"]:
+        ruta_json = f"/tmp/backup_{int(datetime.now().timestamp())}.json"
+        with open(ruta_json, "w", encoding="utf-8") as archivo:
+            json.dump(data, archivo, ensure_ascii=False, indent=2)
+        try:
+            with open(ruta_json, "rb") as archivo:
+                await context.bot.send_document(
+                    chat_id=update.effective_user.id,
+                    document=archivo,
+                    filename="respaldo.json",
+                    caption=(
+                        "Si reseteaste los datos sin querer, responde a este archivo con /restore para recuperarlos."
+                    )
+                )
+        except Exception:
+            await update.message.reply_text(
+                " No pude mandarte el archivo de respaldo por privado. Inicia primero al bot y vuelve a intentar /reset."
+            )
+            if os.path.exists(ruta_json):
+                os.remove(ruta_json)
+            return
+        finally:
+            if os.path.exists(ruta_json):
+                os.remove(ruta_json)
+
     _reset_stats()
-    await update.message.reply_text(" Contador reiniciado a cero.")
+
+    ahora = datetime.now(ADMIN_TZ)
+    config["reset_mes"] = str(ahora.month)
+    config["reset_anio"] = str(ahora.year)
+    _guardar_config("reset_mes", config["reset_mes"])
+    _guardar_config("reset_anio", config["reset_anio"])
+
+    await update.message.reply_text(" Contador y registros reiniciados a cero.")
+
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text(" Solo el admin puede generar un archivo de respaldo.")
+        return
+
+    data = _exportar_backup()
+    if not data["sesiones"] and not data["stats"]:
+        await update.message.reply_text(" No hay datos guardados todavía para respaldar.")
+        return
+
+    ruta_json = f"/tmp/backup_{int(datetime.now().timestamp())}.json"
+    with open(ruta_json, "w", encoding="utf-8") as archivo:
+        json.dump(data, archivo, ensure_ascii=False, indent=2)
+    try:
+        with open(ruta_json, "rb") as archivo:
+            await context.bot.send_document(
+                chat_id=update.effective_user.id,
+                document=archivo,
+                filename="respaldo.json",
+                caption=" Respaldo generado con exito. Responde a este archivo con /restore para restaurarlo cuando quieras."
+            )
+    except Exception:
+        await update.message.reply_text(
+            " No pude se pudo enviar el backup por privado. Inicia primero al bot y vuelve a intentar /export."
+        )
+        return
+    finally:
+        if os.path.exists(ruta_json):
+            os.remove(ruta_json)
+
+async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text(" Solo el admin puede restaurar la base de datos.")
+        return
+
+    documento = update.message.document
+    if not documento and update.message.reply_to_message:
+        documento = update.message.reply_to_message.document
+
+    if not documento:
+        await update.message.reply_text(
+            " Adjunta el archivo backup.json (o responde a el) usando /restore."
+        )
+        return
+
+    try:
+        archivo_tg = await context.bot.get_file(documento.file_id)
+        contenido = await archivo_tg.download_as_bytearray()
+        data = json.loads(bytes(contenido).decode("utf-8"))
+    except Exception:
+        await update.message.reply_text(
+            " Este archivo debe ser un .json."
+        )
+        return
+
+    total_sesiones, total_stats = _importar_backup(data)
+    await update.message.reply_text(
+        f"Base de datos restaurada: {total_sesiones} sesiones y {total_stats} registros de puntos recuperados."
+    )
 
 async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -490,6 +654,7 @@ async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nueva_palabra = context.args[0].lower()
     config["keyword"] = nueva_palabra
+    _guardar_config("keyword", nueva_palabra)
     await update.message.reply_text(f" Palabra de clave cambiada a: <b>{nueva_palabra}</b>", parse_mode="HTML")
 
 async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):    
@@ -508,6 +673,15 @@ async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- MONITOR ---
 
+async def _avisar_admins(context: ContextTypes.DEFAULT_TYPE, mensaje: str):
+    """Manda un aviso por DM a todos los admins. Si alguno nunca le escribió
+    al bot en privado, ese envío falla en silencio (no hay forma de evitarlo)."""
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=mensaje)
+        except Exception:
+            pass
+
 async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -518,12 +692,28 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
 
     if config["keyword"] in texto:
-        _sumar_punto(user_id, nombre, username)
-        _iniciar_sesion(user_id, nombre, username)
+        try:
+            _sumar_punto(user_id, nombre, username)
+            _iniciar_sesion(user_id, nombre, username)
+        except Exception as error:
+            logging.exception("Fallo guardando el registro de entrada")
+            await _avisar_admins(
+                context,
+                f"No se pudo registrar la entrada de {nombre} (falló la base de datos): {error}"
+            )
+            return
         print(f"Registro: {nombre} dijo {config['keyword']}")
 
     elif config["keyword_salida"] in texto:
-        segundos = _cerrar_sesion(user_id, nombre, username)
+        try:
+            segundos = _cerrar_sesion(user_id, nombre, username)
+        except Exception as error:
+            logging.exception("Fallo guardando el registro de salida")
+            await _avisar_admins(
+                context,
+                f"No se pudo registrar la salida de {nombre} (falló la base de datos): {error}"
+            )
+            return
         if segundos is not None:
             await update.message.reply_text(
                 f"<b>Se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activa(o)</b>",
@@ -541,6 +731,7 @@ if __name__ == '__main__':
 
     print("🗄️ Verificando base de datos...")
     _init_db()
+    config.update(_cargar_config())
 
     print("🤖 Iniciando bot de Telegram con run_polling...")
     application = ApplicationBuilder().token(token_bot).build()
@@ -552,6 +743,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("bitacora", historial))
     application.add_handler(CommandHandler("reporte", general))
     application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("export", export_cmd))
+    application.add_handler(CommandHandler("restore", restore))
     application.add_handler(CommandHandler("setkeyword", set_keyword))
     application.add_handler(CommandHandler("trabaja", trabaja))
 
