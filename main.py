@@ -3,7 +3,7 @@ import random
 import logging
 import psycopg2
 import unicodedata
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from reportlab.lib import colors
@@ -181,16 +181,28 @@ def _resolver_user_id_por_username(username: str):
     conn.close()
     return fila[0] if fila else None
 
+def _rango_reporte(anio: int, mes: int):
+    """Devuelve (inicio, fin) del periodo de reporte para un 'mes' dado:
+    del día 3 de ese mes hasta el día 2 del mes siguiente (ambos incluidos)."""
+    inicio = date(anio, mes, 3)
+    if mes == 12:
+        anio_siguiente, mes_siguiente = anio + 1, 1
+    else:
+        anio_siguiente, mes_siguiente = anio, mes + 1
+    fin = date(anio_siguiente, mes_siguiente, 2)
+    return inicio, fin
+
 def _obtener_historial_mes(anio: int, mes: int):
+    inicio, fin = _rango_reporte(anio, mes)
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT fecha, nombre, MAX(username) AS username, SUM(duracion_segundos) AS total
         FROM sesiones
-        WHERE EXTRACT(YEAR FROM fecha) = %s AND EXTRACT(MONTH FROM fecha) = %s
+        WHERE fecha >= %s AND fecha <= %s
         GROUP BY fecha, nombre
         ORDER BY fecha ASC, total DESC;
-    """, (anio, mes))
+    """, (inicio, fin))
     resultados = cur.fetchall()
     cur.close()
     conn.close()
@@ -232,8 +244,7 @@ def _formatear_duracion(segundos: int) -> str:
     return f"{minutos}min"
 
 # --- CONFIGURACIÓN ---
-ADMIN_IDS = (7740467368, )
-#6905064136
+ADMIN_IDS = (7740467368, 6905064136)
 config = {"keyword": "compte", "keyword_salida": "salgo"}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -436,11 +447,13 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     filas = _obtener_historial_mes(anio, mes)
+    inicio, fin = _rango_reporte(anio, mes)
+
     if not filas:
-        await update.message.reply_text(f" No hay actividad registrada de este mes en la base de datos.")
+        await update.message.reply_text(f" No hay actividad registrada en el periodo {rango_texto}.")
         return
 
-    await update.message.reply_text(f"Generando el reporte de {MESES_ES[mes]}, esto tardará unos segundos...")
+    await update.message.reply_text(f"Generando el reporte del {rango_texto}, esto tardará unos segundos...")
     ruta_pdf = _generar_pdf_general(filas, anio, mes)
 
     try:
@@ -448,7 +461,6 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(
                 document=archivo,
                 filename=f"reporte_{MESES_ES[mes].lower()}.pdf",
-                caption=f" Reporte de actividad — {MESES_ES[mes]}"
             )
     finally:
         if os.path.exists(ruta_pdf):
