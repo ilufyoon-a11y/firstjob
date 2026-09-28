@@ -10,7 +10,7 @@ import unicodedata
 import json
 from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import NetworkError
+from telegram.error import NetworkError, Conflict
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
