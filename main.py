@@ -426,6 +426,17 @@ def _existe_pendiente(pid: int) -> bool:
     conn.close()
     return existe
 
+def _pendientes_por_username(username: str):
+    """Devuelve los IDs de pendientes de un @username (sin la @), del más viejo al más nuevo."""
+    username = username.lstrip("@").lower()
+    conn = _get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM pendientes WHERE LOWER(username) = %s ORDER BY creado ASC;", (username,))
+    ids = [f[0] for f in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return ids
+
 def _autoguardar_pendientes_viejos():
     """Si ningún admin decidió a tiempo, se guarda el tiempo calculado."""
     conn = _get_conn()
@@ -512,6 +523,20 @@ def _formatear_duracion(segundos: int) -> str:
         return f"{horas}h"
     return f"{minutos}min"
 
+def _duracion_bonita(segundos: int) -> str:
+    """Versión escrita para mensajes: '1 h y 33 minutos', '3 h y 2 minutos',
+    '2 h', '45 minutos', 'menos de 1 minuto'."""
+    horas = segundos // 3600
+    minutos = (segundos % 3600) // 60
+    txt_min = f"{minutos} minuto" if minutos == 1 else f"{minutos} minutos"
+    if horas and minutos:
+        return f"{horas} h y {txt_min}"
+    if horas:
+        return f"{horas} h"
+    if minutos:
+        return txt_min
+    return "menos de 1 minuto"
+
 def _es_palabra_sola(palabra: str, texto: str) -> bool:
     """True solo si el mensaje ES la palabra. Se ignoran espacios, signos y
     emojis alrededor ('compte', 'Compte!', '¡compte! 🫡' valen), pero
@@ -560,7 +585,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<code>/export</code> → Te manda un backup por DM sin resetear (admin).\n"
         "<code>/restore</code> → Respondiendo a un backup, lo restaura (admin).\n"
         "<code>/setkeyword &lt;palabra&gt;</code> → Cambia la palabra de entrada (admin).\n"
-        "<code>/definir &lt;id&gt; &lt;segundos&gt;</code> → Define a mano el tiempo de una sesión pendiente (admin).\n"
+        "<code>/definir &lt;@usuario&gt; &lt;segundos&gt;</code> → Define a mano el tiempo de una sesión pendiente (admin, solo por privado).\n"
         "<code>/trabaja [@usuario]</code> → Mensaje de sobreexplotación creativa.\n"
         "<code>/help</code> → Muestra este mensaje."
     )
@@ -888,19 +913,33 @@ async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(random.choice(frases))
 
 async def definir(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/definir <id> <segundos>: fija a mano el tiempo de una sesión pendiente."""
+    """/definir <@usuario> <segundos>: fija a mano el tiempo de una sesión pendiente."""
     if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text(" Solo el admin puede definir el tiempo.")
         return
-    if len(context.args) != 2 or not all(a.isdigit() for a in context.args):
-        await update.message.reply_text("Uso: <code>/definir &lt;id&gt; &lt;segundos&gt;</code>", parse_mode="HTML")
+    if update.effective_chat.type != "private":
+        await update.message.reply_text(" Este comando solo funciona por privado conmigo.")
         return
-    res = await asyncio.to_thread(_finalizar_pendiente, int(context.args[0]), int(context.args[1]))
+    if len(context.args) != 2 or not context.args[1].isdigit():
+        await update.message.reply_text(
+            "Uso: <code>/definir &lt;@usuario&gt; &lt;segundos&gt;</code>", parse_mode="HTML"
+        )
+        return
+
+    ids = await asyncio.to_thread(_pendientes_por_username, context.args[0])
+    if not ids:
+        await update.message.reply_text(" Esa persona no tiene pendientes.")
+        return
+
+    # Si tiene varios pendientes, se resuelve el más viejo primero
+    res = await asyncio.to_thread(_finalizar_pendiente, ids[0], int(context.args[1]))
     if not res:
-        await update.message.reply_text(" Ese pendiente no existe o ya fue resuelto.")
+        await update.message.reply_text(" Ese pendiente ya fue resuelto.")
         return
     nombre, seg = res
-    await update.message.reply_text(f" Guardé {_formatear_duracion(seg)} ({seg} s) para {nombre}.")
+    restantes = len(ids) - 1
+    extra = f"\nLe quedan {restantes} pendiente(s) más." if restantes else ""
+    await update.message.reply_text(f" Guardé {_formatear_duracion(seg)} ({seg} s) para {nombre}.{extra}")
 
 # --- MONITOR ---
 
@@ -972,7 +1011,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if segundos is not None:
             await update.message.reply_text(
-                f"<b>{_esc(nombre)}</b>, se ha registrado con éxito los {_formatear_duracion(segundos)} que estuviste activa(o)",
+                f"<b>{_esc(nombre)}</b>, se ha registrado con éxito los {_duracion_bonita(segundos)} que estuviste activa(o)",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
@@ -1028,7 +1067,7 @@ async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["definiendo"] = pid
         await q.edit_message_text(
             f"✍️ Respóndeme aquí con los <b>segundos</b> que estuvo activa(o) (solo el número, ej. 5400 = 1h 30min).\n"
-            f"También puedes usar <code>/definir {pid} &lt;segundos&gt;</code>.",
+            f"También puedes usar <code>/definir @usuario &lt;segundos&gt;</code>.",
             parse_mode="HTML"
         )
 
@@ -1062,7 +1101,7 @@ async def _revisar_sesiones(bot):
             try:
                 await bot.edit_message_text(
                     chat_id=v["chat_id"], message_id=v["msg_id"],
-                    text=f"⏰ {etiqueta} no respondió. Se descontó la hora de espera."
+                    text=f"⏰ {etiqueta} no respondió al chequeo."
                 )
             except Exception:
                 pass
