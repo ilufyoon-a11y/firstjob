@@ -1108,7 +1108,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
     # Los fallos de red pasajeros se reintentan solos; no vale la pena alarmar.
     # (Además, su texto puede traer la URL con el token del bot.)
-    if isinstance(error, NetworkError):
+    if isinstance(error, (NetworkError, Conflict)):
         return
 
     ahora = time.monotonic()
