@@ -307,24 +307,30 @@ def _cerrar_sesion(user_id: str, nombre: str, username: str = None):
 
 # --- CHEQUEO "¿AÚN ESTÁS AHÍ?" ---
 
-def _sesiones_por_preguntar():
+def _reclamar_sesiones_por_preguntar():
+    """Marca pregunta_en = NOW() en el mismo instante en que reclama la sesión,
+    ANTES de enviar el mensaje. Así el botón siempre encuentra la pregunta
+    activa, y dos ciclos del vigilante nunca preguntan dos veces a la misma
+    persona."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT user_id, nombre, username, chat_id FROM sesiones_activas
-        WHERE chat_id IS NOT NULL AND pregunta_en IS NULL AND chequeo_en <= NOW();
+        UPDATE sesiones_activas SET pregunta_en = NOW()
+        WHERE chat_id IS NOT NULL AND pregunta_en IS NULL AND chequeo_en <= NOW()
+        RETURNING user_id, nombre, username, chat_id;
     """)
     filas = cur.fetchall()
+    conn.commit()
     cur.close()
     conn.close()
     return filas
 
-def _marcar_pregunta(user_id: str, msg_id):
+def _guardar_msg_id(user_id: str, msg_id):
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE sesiones_activas SET pregunta_en = NOW(), pregunta_msg_id = %s
-        WHERE user_id = %s;
+        UPDATE sesiones_activas SET pregunta_msg_id = %s
+        WHERE user_id = %s AND pregunta_en IS NOT NULL;
     """, (msg_id, user_id))
     conn.commit()
     cur.close()
@@ -332,7 +338,8 @@ def _marcar_pregunta(user_id: str, msg_id):
 
 def _confirmar_presencia(user_id: str):
     """El usuario dijo 'sí sigo aquí': el cronómetro sigue y se vuelve a
-    preguntar en 2 horas. Devuelve el nombre, o None si ya no había pregunta activa."""
+    preguntar después de AVISO_CADA. Devuelve el nombre, o None si ya no había
+    pregunta activa."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -348,9 +355,9 @@ def _confirmar_presencia(user_id: str):
     return fila[0] if fila else None
 
 def _pasar_vencidas_a_pendiente():
-    """Las sesiones cuya pregunta lleva más de 1 hora sin respuesta se sacan de
-    'activas' y pasan a 'pendientes'. El tiempo calculado es el que hubo hasta
-    que se envió la pregunta (o sea, ya sin la hora de espera)."""
+    """Las sesiones cuya pregunta lleva más de ESPERA_RESPUESTA sin respuesta se
+    sacan de 'activas' y pasan a 'pendientes'. El tiempo calculado es el que
+    hubo hasta que se envió la pregunta (o sea, ya sin la espera)."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -560,7 +567,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(menu, parse_mode="HTML")
 
 async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ranking = _obtener_top(10)
+    ranking = await asyncio.to_thread(_obtener_top, 10)
     if not ranking:
         await update.message.reply_text(" No hay datos aún. ¡A trabajar!")
         return
@@ -579,7 +586,7 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if solicitante_id not in ADMIN_IDS:
             await update.message.reply_text(" Solo el admin puede ver el historial de otra persona.")
             return
-        objetivo_id = _resolver_user_id_por_username(context.args[0])
+        objetivo_id = await asyncio.to_thread(_resolver_user_id_por_username, context.args[0])
         if not objetivo_id:
             await update.message.reply_text(
                 " Aun no hay actividad registrada por parte de esta(e) admin..."
@@ -588,7 +595,7 @@ async def historial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         objetivo_id = str(solicitante_id)
 
-    filas = _obtener_historial(objetivo_id, 14)
+    filas = await asyncio.to_thread(_obtener_historial, objetivo_id, 14)
     if not filas:
         await update.message.reply_text(" Aun no hay actividad registrada por parte de esta(e) admin...")
         return
@@ -732,7 +739,7 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(" Solo el admin puede ver el reporte general.")
         return
 
-    filas = _obtener_historial_periodo_actual()
+    filas = await asyncio.to_thread(_obtener_historial_periodo_actual)
     if not filas:
         await update.message.reply_text(" No hay actividad registrada desde el último reset.")
         return
@@ -740,7 +747,7 @@ async def general(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Generando el reporte del periodo actual, esto tardará unos segundos...")
 
     mes_periodo = MESES_ES[int(config["reset_mes"])]
-    ruta_pdf = _generar_pdf_general(filas, mes_periodo)
+    ruta_pdf = await asyncio.to_thread(_generar_pdf_general, filas, mes_periodo)
 
     try:
         with open(ruta_pdf, "rb") as archivo:
@@ -758,7 +765,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(" Solo el admin puede reiniciar el contador.")
         return
 
-    data = _exportar_backup()
+    data = await asyncio.to_thread(_exportar_backup)
     if data["sesiones"] or data["stats"]:
         ruta_json = f"/tmp/backup_{int(datetime.now().timestamp())}.json"
         with open(ruta_json, "w", encoding="utf-8") as archivo:
@@ -777,20 +784,18 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 " No pude mandarte el archivo de respaldo por privado. Inicia primero al bot y vuelve a intentar /reset."
             )
-            if os.path.exists(ruta_json):
-                os.remove(ruta_json)
             return
         finally:
             if os.path.exists(ruta_json):
                 os.remove(ruta_json)
 
-    _reset_stats()
+    await asyncio.to_thread(_reset_stats)
 
     ahora = datetime.now(ADMIN_TZ)
     config["reset_mes"] = str(ahora.month)
     config["reset_anio"] = str(ahora.year)
-    _guardar_config("reset_mes", config["reset_mes"])
-    _guardar_config("reset_anio", config["reset_anio"])
+    await asyncio.to_thread(_guardar_config, "reset_mes", config["reset_mes"])
+    await asyncio.to_thread(_guardar_config, "reset_anio", config["reset_anio"])
 
     await update.message.reply_text(" Contador y registros reiniciados a cero.")
 
@@ -799,7 +804,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(" Solo el admin puede generar un archivo de respaldo.")
         return
 
-    data = _exportar_backup()
+    data = await asyncio.to_thread(_exportar_backup)
     if not data["sesiones"] and not data["stats"]:
         await update.message.reply_text(" No hay datos guardados todavía para respaldar.")
         return
@@ -849,7 +854,7 @@ async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    total_sesiones, total_stats = _importar_backup(data)
+    total_sesiones, total_stats = await asyncio.to_thread(_importar_backup, data)
     await update.message.reply_text(
         f"Base de datos restaurada: {total_sesiones} sesiones y {total_stats} registros de puntos recuperados."
     )
@@ -865,7 +870,7 @@ async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     nueva_palabra = context.args[0].lower()
     config["keyword"] = nueva_palabra
-    _guardar_config("keyword", nueva_palabra)
+    await asyncio.to_thread(_guardar_config, "keyword", nueva_palabra)
     await update.message.reply_text(f" Palabra de clave cambiada a: <b>{_esc(nueva_palabra)}</b>", parse_mode="HTML")
 
 async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1024,9 +1029,9 @@ async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- VIGILANTE (corre cada minuto) ---
 
 async def _revisar_sesiones(bot):
-    # 1) Preguntar "¿Aún estás ahí?" a quien ya cumplió 2 horas
-    for user_id, nombre, username, chat_id in await asyncio.to_thread(_sesiones_por_preguntar):
-        msg_id = None
+    # 1) Preguntar "¿Aún estás ahí?" a quien ya cumplió el tiempo.
+    #    La sesión se "reclama" (pregunta_en = NOW()) antes de enviar el mensaje.
+    for user_id, nombre, username, chat_id in await asyncio.to_thread(_reclamar_sesiones_por_preguntar):
         try:
             teclado = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Sí, sigo aquí", callback_data=f"aqui:{user_id}")
@@ -1040,10 +1045,9 @@ async def _revisar_sesiones(bot):
                 parse_mode="HTML",
                 reply_markup=teclado
             )
-            msg_id = m.message_id
+            await asyncio.to_thread(_guardar_msg_id, user_id, m.message_id)
         except Exception:
             logging.exception("No pude enviar el '¿Aún estás ahí?'")
-        await asyncio.to_thread(_marcar_pregunta, user_id, msg_id)
 
     # 2) Pasar a "pendiente" las que llevan 1 hora sin respuesta y avisar a los admins
     for v in await asyncio.to_thread(_pasar_vencidas_a_pendiente):
@@ -1133,7 +1137,13 @@ if __name__ == '__main__':
     config.update(_cargar_config())
 
     print("🤖 Iniciando bot de Telegram con run_polling...")
-    application = ApplicationBuilder().token(token_bot).post_init(post_init).build()
+    application = (
+        ApplicationBuilder()
+        .token(token_bot)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .build()
+    )
 
     # Registro de Handlers
     application.add_handler(CommandHandler("inicio", help_command))
