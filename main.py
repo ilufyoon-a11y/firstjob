@@ -45,9 +45,9 @@ MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 # --- TIEMPOS DEL "¿AÚN ESTÁS AHÍ?" ---
-AVISO_CADA = timedelta(hours=2)          # cada cuánto se pregunta si sigue activa(o)
-ESPERA_RESPUESTA = timedelta(hours=1)    # cuánto se espera la respuesta (se descuenta si no responde)
-ESPERA_ADMIN = timedelta(hours=6)        # si ningún admin decide en este tiempo, se guarda solo
+AVISO_CADA = timedelta(minutes=5)        # antes: hours=2
+ESPERA_RESPUESTA = timedelta(minutes=3)  # antes: hours=1
+ESPERA_ADMIN = timedelta(minutes=5)      # antes: hours=6
 
 # --- PALETA PASTEL PARA EL PDF ---
 CREMA = colors.HexColor("#FAF6FC")
