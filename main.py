@@ -977,6 +977,12 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
 
+# --- DIAGNÓSTICO DE BOTONES ---
+
+async def _log_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    logging.info(f"CALLBACK recibido: data={q.data} de={q.from_user.id}")
+
 # --- BOTONES: "¿AÚN ESTÁS AHÍ?" ---
 
 async def confirmar_presencia(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1167,6 +1173,10 @@ if __name__ == '__main__':
 
     # Monitor de texto
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, monitor))
+
+    # Diagnóstico: registra cada clic de botón que llega (grupo -1 = corre primero
+    # y no estorba a los handlers reales). Bórralo cuando ya funcione.
+    application.add_handler(CallbackQueryHandler(_log_callback), group=-1)
 
     # Errores
     application.add_error_handler(error_handler)
