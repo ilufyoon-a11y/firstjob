@@ -45,9 +45,9 @@ MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 # --- TIEMPOS DEL "¿AÚN ESTÁS AHÍ?" ---
-AVISO_CADA = timedelta(minutes=5)        # antes: hours=2
-ESPERA_RESPUESTA = timedelta(minutes=3)  # antes: hours=1
-ESPERA_ADMIN = timedelta(minutes=5)      # antes: hours=6
+AVISO_CADA = timedelta(hours=2)
+ESPERA_RESPUESTA = timedelta(minutes=30)
+ESPERA_ADMIN = timedelta(hours=6)
 
 # --- PALETA PASTEL PARA EL PDF ---
 CREMA = colors.HexColor("#FAF6FC")
@@ -139,9 +139,6 @@ def _guardar_config(clave: str, valor: str):
     conn.close()
 
 def _cargar_config() -> dict:
-    """Carga la config guardada en la base de datos (keyword, mes del último
-    reset, etc). Si no hay nada (primera vez), usa los valores por defecto
-    y los guarda para la próxima, así sobrevive a reinicios del bot."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("SELECT clave, valor FROM config;")
@@ -195,9 +192,6 @@ def _reset_stats():
     conn.close()
 
 def _exportar_backup():
-    """Saca una copia completa de 'sesiones' y 'stats' en un dict serializable
-    a JSON, para poder restaurarlo después con _importar_backup si se resetea
-    todo por accidente."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("SELECT user_id, nombre, username, fecha, duracion_segundos FROM sesiones ORDER BY id;")
@@ -221,8 +215,6 @@ def _exportar_backup():
     return {"sesiones": sesiones, "stats": stats}
 
 def _importar_backup(data: dict) -> tuple:
-    """Restaura un backup generado por _exportar_backup. Es aditivo: no borra
-    nada de lo que ya haya, solo agrega las sesiones y suma los puntos."""
     sesiones = data.get("sesiones", [])
     stats = data.get("stats", [])
     conn = _get_conn()
@@ -247,11 +239,6 @@ def _importar_backup(data: dict) -> tuple:
 # --- SESIONES (una por usuario, identificadas por user_id) ---
 
 def _iniciar_sesion(user_id: str, nombre: str, username: str, chat_id: int):
-    """Abre la sesión de ESTE usuario. Cada persona tiene su propia fila
-    (clave = user_id), así que varias personas pueden activar a la vez sin
-    pisarse. Si el usuario ya tenía una sesión activa, NO se reinicia su
-    cronómetro (no se pierde tiempo ni se duplica el punto).
-    Devuelve (fue_nueva, inicio)."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -279,8 +266,6 @@ def _iniciar_sesion(user_id: str, nombre: str, username: str, chat_id: int):
     return fue_nueva, inicio
 
 def _cerrar_sesion(user_id: str, nombre: str, username: str = None):
-    """Cierra la sesión activa de este usuario (si existe) y guarda la duración
-    en el historial. Devuelve segundos o None si no había sesión activa."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM sesiones_activas WHERE user_id = %s RETURNING inicio;", (user_id,))
@@ -308,10 +293,6 @@ def _cerrar_sesion(user_id: str, nombre: str, username: str = None):
 # --- CHEQUEO "¿AÚN ESTÁS AHÍ?" ---
 
 def _reclamar_sesiones_por_preguntar():
-    """Marca pregunta_en = NOW() en el mismo instante en que reclama la sesión,
-    ANTES de enviar el mensaje. Así el botón siempre encuentra la pregunta
-    activa, y dos ciclos del vigilante nunca preguntan dos veces a la misma
-    persona."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -337,17 +318,15 @@ def _guardar_msg_id(user_id: str, msg_id):
     conn.close()
 
 def _confirmar_presencia(user_id: str):
-    """El usuario dijo 'sí sigo aquí': el cronómetro sigue y se vuelve a
-    preguntar después de AVISO_CADA. Devuelve el nombre, o None si ya no había
-    pregunta activa."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
         UPDATE sesiones_activas
         SET chequeo_en = NOW() + %s, pregunta_en = NULL, pregunta_msg_id = NULL
         WHERE user_id = %s AND pregunta_en IS NOT NULL
+          AND pregunta_en + %s > NOW()
         RETURNING nombre;
-    """, (AVISO_CADA, user_id))
+    """, (AVISO_CADA, user_id, ESPERA_RESPUESTA))
     fila = cur.fetchone()
     conn.commit()
     cur.close()
@@ -355,9 +334,6 @@ def _confirmar_presencia(user_id: str):
     return fila[0] if fila else None
 
 def _pasar_vencidas_a_pendiente():
-    """Las sesiones cuya pregunta lleva más de ESPERA_RESPUESTA sin respuesta se
-    sacan de 'activas' y pasan a 'pendientes'. El tiempo calculado es el que
-    hubo hasta que se envió la pregunta (o sea, ya sin la espera)."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -392,8 +368,6 @@ def _pasar_vencidas_a_pendiente():
     return vencidas
 
 def _finalizar_pendiente(pid: int, segundos: int = None):
-    """Guarda una sesión pendiente en el historial. Si segundos es None se usa
-    el tiempo calculado. Devuelve (nombre, segundos) o None si ya estaba resuelta."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -427,7 +401,6 @@ def _existe_pendiente(pid: int) -> bool:
     return existe
 
 def _pendientes_por_username(username: str):
-    """Devuelve los IDs de pendientes de un @username (sin la @), del más viejo al más nuevo."""
     username = username.lstrip("@").lower()
     conn = _get_conn()
     cur = conn.cursor()
@@ -455,7 +428,6 @@ def _autoguardar_pendientes_viejos():
 # --- OTRAS CONSULTAS ---
 
 def _resolver_user_id_por_username(username: str):
-    """Busca el user_id más reciente asociado a un @username (sin la @)."""
     username = username.lstrip("@").lower()
     conn = _get_conn()
     cur = conn.cursor()
@@ -471,9 +443,6 @@ def _resolver_user_id_por_username(username: str):
     return fila[0] if fila else None
 
 def _obtener_historial_periodo_actual():
-    """Trae todo el historial acumulado desde el último /reset (como /reset
-    borra la tabla 'sesiones', todo lo que queda aquí pertenece al periodo
-    actual: desde ese reset hasta ahora)."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -489,7 +458,6 @@ def _obtener_historial_periodo_actual():
 
 
 def _obtener_historial(user_id: str, dias: int = 14):
-    """Historial de los últimos N días para un usuario específico."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -505,10 +473,6 @@ def _obtener_historial(user_id: str, dias: int = 14):
     return resultados
 
 def _sanitizar_texto_pdf(texto: str) -> str:
-    """Convierte caracteres unicode 'decorados' (como los estilos matemáticos
-    tipo 𝖬𝗎𝖾𝗌𝗍𝗋𝖺) a su letra normal, y descarta lo que no se pueda dibujar
-    con las fuentes base de reportlab (emojis, símbolos raros), para
-    evitar los cuadraditos."""
     if not texto:
         return texto
     normalizado = unicodedata.normalize('NFKC', texto)
@@ -524,8 +488,6 @@ def _formatear_duracion(segundos: int) -> str:
     return f"{minutos}min"
 
 def _duracion_bonita(segundos: int) -> str:
-    """Versión escrita para mensajes: '1 h y 33 minutos', '3 h y 2 minutos',
-    '2 h', '45 minutos', 'menos de 1 minuto'."""
     horas = segundos // 3600
     minutos = (segundos % 3600) // 60
     txt_min = f"{minutos} minuto" if minutos == 1 else f"{minutos} minutos"
@@ -538,14 +500,9 @@ def _duracion_bonita(segundos: int) -> str:
     return "menos de 1 minuto"
 
 def _es_palabra_sola(palabra: str, texto: str) -> bool:
-    """True solo si el mensaje ES la palabra. Se ignoran espacios, signos y
-    emojis alrededor ('compte', 'Compte!', '¡compte! 🫡' valen), pero
-    'no salgo hoy' o 'compte gracias' NO valen."""
     return re.fullmatch(rf"\W*{re.escape(palabra)}\W*", texto.strip(), re.IGNORECASE) is not None
 
 def _registrar_entrada(user_id: str, nombre: str, username: str, chat_id: int):
-    """Abre la sesión y suma el punto (solo si la sesión es nueva). Se agrupa
-    en una función para ejecutarla fuera del hilo principal del bot."""
     fue_nueva, inicio = _iniciar_sesion(user_id, nombre, username, chat_id)
     if fue_nueva:
         _sumar_punto(user_id, nombre, username)
@@ -554,13 +511,13 @@ def _registrar_entrada(user_id: str, nombre: str, username: str, chat_id: int):
 def _esc(texto) -> str:
     return html.escape(str(texto or ""))
 
+def _aislar_nombre(texto) -> str:
+    return f"\u2068{_esc(texto)}\u2069"
+
 def _etiqueta_texto(nombre, username) -> str:
-    """Cómo nombrar a alguien en texto plano: @usuario si tiene, si no su nombre."""
     return f"@{username}" if username else (nombre or "alguien")
 
 def _mencion_html(user_id, nombre, username) -> str:
-    """Cómo mencionar a alguien en un mensaje HTML. Con @usuario le llega la
-    notificación; si no tiene, se usa un enlace con su nombre (también notifica)."""
     if username:
         return f"@{_esc(username)}"
     return f'<a href="tg://user?id={user_id}">{_esc(nombre or "alguien")}</a>'
@@ -570,7 +527,6 @@ ADMIN_IDS = (6905064136,)
 config = {"keyword": "compte", "keyword_salida": "salgo", "reset_mes": None, "reset_anio": None}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-# httpx imprime cada URL de Telegram, y esa URL lleva el token del bot. Lo silenciamos.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- COMANDOS ---
@@ -578,16 +534,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu = (
         "<b>Manual de Operaciones (Comandos)</b>\n\n"
-        "<code>/top</code> → Muestra el top de actividad.\n"
-        "<code>/bitacora [@usuario]</code> → Tu historial de los últimos 14 días (el admin puede ver el de otra persona).\n"
-        "<code>/reporte</code> → PDF del periodo actual (admin).\n"
-        "<code>/reset</code> → Reinicia el contador; antes te manda el backup por DM (admin).\n"
-        "<code>/export</code> → Te manda un backup por DM sin resetear (admin).\n"
-        "<code>/restore</code> → Respondiendo a un backup, lo restaura (admin).\n"
-        "<code>/setkeyword &lt;palabra&gt;</code> → Cambia la palabra de entrada (admin).\n"
-        "<code>/definir &lt;@usuario&gt; &lt;segundos&gt;</code> → Define a mano el tiempo de una sesión pendiente (admin, solo por privado).\n"
-        "<code>/trabaja [@usuario]</code> → Mensaje de sobreexplotación creativa.\n"
-        "<code>/help</code> → Muestra este mensaje."
+        "<code>/top</code> → 𝖬𝗎𝖾𝗌𝗍𝗋𝖺 𝖾𝗅 𝗍𝗈𝗉 𝖽𝖾 𝖺𝖼𝗍𝗂𝗏𝗂𝖽𝖺𝖽.\n"
+        "<code>/reset</code> → 𝖱𝖾𝗂𝗇𝗂𝖼𝗂𝖺 𝖾𝗅 𝖼𝗈𝗇𝗍𝖺𝖽𝗈𝗋 𝖽𝖾 𝗆𝖾𝗇𝗌𝖺𝗃𝖾𝗌.\n"
+        "<code>/setkeyword &lt;palabra&gt;</code> → 𝖢𝖺𝗆𝖻𝗂𝖺 𝗅𝖺 𝗉𝖺𝗅𝖺𝖻𝗋𝖺 𝖽𝖾 𝗏𝗂𝗀𝗂𝗅𝖺𝗇𝖼𝗂𝖺.\n"
+        "<code>/trabaja [@usuario]</code> → 𝖬𝖾𝗇𝗌𝖺𝗃𝖾 𝖽𝖾 𝗌𝗈𝖻𝗋𝖾𝖾𝗑𝗉𝗅𝗈𝗍𝖺𝖼𝗂ó𝗇 𝖼𝗋𝖾𝖺𝗍𝗂𝗏𝖺.\n"
+        "<code>/help</code> → 𝖬𝗎𝖾𝗌𝗍𝗋𝖺 𝖾𝗌𝗍𝖾 𝗆𝖾𝗇𝗌𝖺𝗃𝖾."
     )
     await update.message.reply_text(menu, parse_mode="HTML")
 
@@ -600,7 +551,7 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mensaje = "<b>TOP DE COMPTES</b>\n\n"
     for i, (nombre, puntos) in enumerate(ranking, 1):
         medalla = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        mensaje += f"{medalla} <b>{_esc(nombre)}</b>: {puntos} veces\n"
+        mensaje += f"{medalla} <b>{_aislar_nombre(nombre)}</b>: {puntos} veces\n"
 
     await update.message.reply_text(mensaje, parse_mode="HTML")
 
@@ -668,8 +619,6 @@ def _pie_de_pagina(canvas, doc):
     canvas.restoreState()
 
 def _generar_pdf_general(filas, mes_titulo: str = None) -> str:
-    """Genera el PDF del reporte del periodo actual (desde el último /reset)
-    con diseño pastel, y devuelve la ruta del archivo temporal."""
     ruta = f"/tmp/reporte_{int(datetime.now().timestamp())}.pdf"
 
     por_dia = {}
@@ -679,8 +628,6 @@ def _generar_pdf_general(filas, mes_titulo: str = None) -> str:
     for fecha, nombre, username, total_segundos in filas:
         nombre = _sanitizar_texto_pdf(nombre)
         etiqueta = f"@{_sanitizar_texto_pdf(username)}" if username else nombre
-        # Agrupamos por username (estable) y no por nombre (cambia seguido),
-        # para que la misma persona no salga repetida en el resumen.
         clave = username.lower() if username else nombre
         if fecha not in por_dia:
             por_dia[fecha] = []
@@ -802,12 +749,12 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     document=archivo,
                     filename="respaldo.json",
                     caption=(
-                        "Si reseteaste los datos sin querer, responde a este archivo con /restore para recuperarlos."
+                        "Si reseteaste los datos sin querer, responde a este archivo con /restore para restaurar el historial."
                     )
                 )
         except Exception:
             await update.message.reply_text(
-                " No pude mandarte el archivo de respaldo por privado. Inicia primero al bot y vuelve a intentar /reset."
+                " No se pudo mandar el archivo de respaldo por privado. Inicia primero al bot y vuelve a intentar /reset."
             )
             return
         finally:
@@ -826,7 +773,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text(" Solo el admin puede generar un archivo de respaldo.")
+        await update.message.reply_text(" Solo el admin puede cargar el respaldo.")
         return
 
     data = await asyncio.to_thread(_exportar_backup)
@@ -843,7 +790,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=update.effective_user.id,
                 document=archivo,
                 filename="respaldo.json",
-                caption=" Respaldo generado con exito. Responde a este archivo con /restore para restaurarlo cuando quieras."
+                caption=" Archivo de respaldo generado con exito.\n\nResponde a este archivo con /restore para restaurarlo cuando quieras."
             )
     except Exception:
         await update.message.reply_text(
@@ -913,12 +860,11 @@ async def trabaja(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(random.choice(frases))
 
 async def definir(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/definir <@usuario> <segundos>: fija a mano el tiempo de una sesión pendiente."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text(" Solo el admin puede definir el tiempo.")
+        await update.message.reply_text("Solo el admin puede definir el tiempo.")
         return
     if update.effective_chat.type != "private":
-        await update.message.reply_text(" Este comando solo funciona por privado conmigo.")
+        await update.message.reply_text("Este comando solo funciona por privado conmigo.")
         return
     if len(context.args) != 2 or not context.args[1].isdigit():
         await update.message.reply_text(
@@ -928,24 +874,21 @@ async def definir(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ids = await asyncio.to_thread(_pendientes_por_username, context.args[0])
     if not ids:
-        await update.message.reply_text(" Esa persona no tiene pendientes.")
+        await update.message.reply_text("Esta(e) admin no tiene sesiones pendientes.")
         return
 
-    # Si tiene varios pendientes, se resuelve el más viejo primero
     res = await asyncio.to_thread(_finalizar_pendiente, ids[0], int(context.args[1]))
     if not res:
-        await update.message.reply_text(" Ese pendiente ya fue resuelto.")
+        await update.message.reply_text("La sesion pendiente ya fue resuelto.")
         return
     nombre, seg = res
     restantes = len(ids) - 1
     extra = f"\nLe quedan {restantes} pendiente(s) más." if restantes else ""
-    await update.message.reply_text(f" Guardé {_formatear_duracion(seg)} ({seg} s) para {nombre}.{extra}")
+    await update.message.reply_text(f"Se registró {_formatear_duracion(seg)} ({seg} s) para {nombre}.{extra}")
 
 # --- MONITOR ---
 
 async def _avisar_admins(context, mensaje: str, html_mode: bool = False, reply_markup=None):
-    """Manda un aviso por DM a todos los admins. Si alguno nunca le escribió
-    al bot en privado, ese envío falla en silencio (no hay forma de evitarlo)."""
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(
@@ -966,16 +909,15 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     chat_id = update.effective_chat.id
 
-    # Un admin que pulsó "Definir segundos" responde aquí con el número
     pid = context.user_data.get("definiendo")
     if pid and update.effective_chat.type == "private" and texto.strip().isdigit():
         context.user_data.pop("definiendo", None)
         res = await asyncio.to_thread(_finalizar_pendiente, pid, int(texto.strip()))
         if res:
             n, seg = res
-            await update.message.reply_text(f" Guardé {_formatear_duracion(seg)} ({seg} s) para {n}.")
+            await update.message.reply_text(f"Se registró {_formatear_duracion(seg)} ({seg} s) para {n}.")
         else:
-            await update.message.reply_text(" Ese pendiente ya fue resuelto.")
+            await update.message.reply_text("La sesión pendiente ya fue resuelta.")
         return
 
     if _es_palabra_sola(config["keyword"], texto):
@@ -995,7 +937,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             llevas = int((datetime.now(timezone.utc) - inicio).total_seconds())
             await update.message.reply_text(
-                f"<b>{_esc(nombre)}</b>, ya tienes una sesión activa (llevas {_formatear_duracion(llevas)}). Sigo contando 😉",
+                f"<b>{_esc(nombre)}</b>, ya tienes una sesión activa (de {_formatear_duracion(llevas)}). Sigo contando 😉",
                 parse_mode="HTML"
             )
 
@@ -1003,7 +945,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             segundos = await asyncio.to_thread(_cerrar_sesion, user_id, nombre, username)
         except Exception as error:
-            logging.exception("Fallo guardando el registro de salida")
+            logging.exception("Fallo el registro de salida")
             await _avisar_admins(
                 context,
                 f"No se pudo registrar la salida de {_etiqueta_texto(nombre, username)} (falló la base de datos): {error}"
@@ -1011,7 +953,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if segundos is not None:
             await update.message.reply_text(
-                f"<b>{_esc(nombre)}</b>, se ha registrado con éxito los {_duracion_bonita(segundos)} que estuviste activa(o)",
+                f"<b>Se ha registrado con éxito los {_duracion_bonita(segundos)} que estuviste activa(o)",
                 parse_mode="HTML"
             )
             print(f"Salida: {nombre} estuvo activo {_formatear_duracion(segundos)}")
@@ -1028,24 +970,24 @@ async def confirmar_presencia(update: Update, context: ContextTypes.DEFAULT_TYPE
     q = update.callback_query
     uid = q.data.split(":", 1)[1]
     if str(q.from_user.id) != uid:
-        await q.answer("Este botón es solo para quien activó el compte 🙂", show_alert=True)
+        await q.answer("Este botón es solo para quien activó el compte!!", show_alert=True)
         return
     await q.answer()
     nombre = await asyncio.to_thread(_confirmar_presencia, uid)
     if nombre:
         await q.edit_message_text(
-            f"✅ Perfecto, <b>{_esc(nombre)}</b>. Sigo contando tu tiempo y te vuelvo a preguntar en 2 horas.",
+            f"Muchas gracias por responder, <b>{_esc(nombre)}</b>, sigo contando tu tiempo de activación.",
             parse_mode="HTML"
         )
     else:
         await q.edit_message_text(
-            "Esa sesión ya no está activa (se agotó el tiempo de espera o ya registraste tu salida)."
+            "Esta sesión ya no está activa (se agotó el tiempo de espera o ya registraste tu salida)."
         )
 
 async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     if q.from_user.id not in ADMIN_IDS:
-        await q.answer("Solo los admins pueden decidir esto.", show_alert=True)
+        await q.answer("Solo el admin pueden decidir esto.", show_alert=True)
         return
     await q.answer()
     accion, pid = q.data.split(":")
@@ -1054,19 +996,19 @@ async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if accion == "pok":
         res = await asyncio.to_thread(_finalizar_pendiente, pid, None)
         if not res:
-            await q.edit_message_text("Este pendiente ya fue resuelto.")
+            await q.edit_message_text("Esta sesión pendiente ya fue resuelta.")
             return
         nombre, seg = res
         await q.edit_message_text(
-            f"✅ Guardé {_formatear_duracion(seg)} para <b>{_esc(nombre)}</b>.", parse_mode="HTML"
+            f"Se registraron los {_formatear_duracion(seg)} de <b>{_esc(nombre)}</b>.", parse_mode="HTML"
         )
     else:  # pdef
         if not await asyncio.to_thread(_existe_pendiente, pid):
-            await q.edit_message_text("Este pendiente ya fue resuelto.")
+            await q.edit_message_text("Esta sesión pendiente ya fue resuelta.")
             return
         context.user_data["definiendo"] = pid
         await q.edit_message_text(
-            f"✍️ Respóndeme aquí con los <b>segundos</b> que estuvo activa(o) (solo el número, ej. 5400 = 1h 30min).\n"
+            f"Para poder realizar el registro responde con los <b>segundos</b> que estuvo activa(o) (solo el número, ej. 5400 = 1h 30min).\n\n"
             f"También puedes usar <code>/definir @usuario &lt;segundos&gt;</code>.",
             parse_mode="HTML"
         )
@@ -1074,8 +1016,6 @@ async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- VIGILANTE (corre cada minuto) ---
 
 async def _revisar_sesiones(bot):
-    # 1) Preguntar "¿Aún estás ahí?" a quien ya cumplió el tiempo.
-    #    La sesión se "reclama" (pregunta_en = NOW()) antes de enviar el mensaje.
     for user_id, nombre, username, chat_id in await asyncio.to_thread(_reclamar_sesiones_por_preguntar):
         try:
             teclado = InlineKeyboardMarkup([[
@@ -1085,7 +1025,6 @@ async def _revisar_sesiones(bot):
                 chat_id=chat_id,
                 text=(
                     f'{_mencion_html(user_id, nombre, username)}, ¿aún estás ahí? 👀\n'
-                    f"Pulsa el botón en la próxima hora o descontaré ese tiempo de espera."
                 ),
                 parse_mode="HTML",
                 reply_markup=teclado
@@ -1094,7 +1033,6 @@ async def _revisar_sesiones(bot):
         except Exception:
             logging.exception("No pude enviar el '¿Aún estás ahí?'")
 
-    # 2) Pasar a "pendiente" las que llevan 1 hora sin respuesta y avisar a los admins
     for v in await asyncio.to_thread(_pasar_vencidas_a_pendiente):
         etiqueta = _etiqueta_texto(v["nombre"], v["username"])
         if v["chat_id"] and v["msg_id"]:
@@ -1106,15 +1044,14 @@ async def _revisar_sesiones(bot):
             except Exception:
                 pass
         teclado = InlineKeyboardMarkup([[
-            InlineKeyboardButton(f"✅ Guardar {_formatear_duracion(v['segundos'])}", callback_data=f"pok:{v['pid']}"),
-            InlineKeyboardButton("✍️ Definir segundos", callback_data=f"pdef:{v['pid']}"),
+            InlineKeyboardButton(f"Guardar {_formatear_duracion(v['segundos'])}", callback_data=f"pok:{v['pid']}"),
+            InlineKeyboardButton("Definir los segundos", callback_data=f"pdef:{v['pid']}"),
         ]])
         sin_user = "" if v["username"] else f" (sin @usuario, ID <code>{v['user_id']}</code>)"
         aviso = (
-            f"⚠️ <b>{_esc(etiqueta)}</b>{sin_user} no respondió al «¿Aún estás ahí?» en 1 hora.\n"
-            f"Descontando la hora de espera, estuvo activa(o) <b>{_formatear_duracion(v['segundos'])}</b>.\n\n"
-            f"¿Qué hago? Si nadie decide en 6 horas, se guarda ese tiempo automáticamente.\n"
-            f"ID del pendiente: <code>{v['pid']}</code>"
+            f"⚠️ <b>{_esc(etiqueta)}</b>{sin_user} no respondió al «¿Aún estás ahí?» en {_duracion_bonita(int(ESPERA_RESPUESTA.total_seconds()))}.\n"
+            f"Descontando el tiempo de espera para su respuesta, estuvo activa(o) <b>{_formatear_duracion(v['segundos'])}</b>.\n\n"
+            f"¿Qué hago? Si decides no configurar el tiempo correcto de su activación, guardaré ese tiempo automáticamente.\n"
         )
         for admin_id in ADMIN_IDS:
             try:
@@ -1122,13 +1059,12 @@ async def _revisar_sesiones(bot):
             except Exception:
                 pass
 
-    # 3) Si ningún admin decidió a tiempo, se guarda el tiempo calculado
     for nombre, seg in await asyncio.to_thread(_autoguardar_pendientes_viejos):
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
                     chat_id=admin_id,
-                    text=f"Nadie decidió a tiempo: guardé automáticamente {_formatear_duracion(seg)} para {nombre}."
+                    text=f"No se registró ninguna respuesta, por lo tanto, se registró automáticamente {_formatear_duracion(seg)} para {nombre}."
                 )
             except Exception:
                 pass
@@ -1149,14 +1085,10 @@ async def post_init(app):
 _ultimo_aviso_error = 0.0
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Registra cualquier error que ocurra dentro de un handler y avisa a los
-    admins por DM (máximo un aviso cada 5 minutos para no llenarte de mensajes)."""
     global _ultimo_aviso_error
     error = context.error
     logging.error("Error en un handler", exc_info=error)
 
-    # Los fallos de red pasajeros se reintentan solos; no vale la pena alarmar.
-    # (Además, su texto puede traer la URL con el token del bot.)
     if isinstance(error, (NetworkError, Conflict)):
         return
 
