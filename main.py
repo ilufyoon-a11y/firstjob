@@ -1181,4 +1181,4 @@ if __name__ == '__main__':
     # Errores
     application.add_error_handler(error_handler)
 
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
