@@ -311,7 +311,7 @@ def _sesiones_por_preguntar():
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT user_id, nombre, chat_id FROM sesiones_activas
+        SELECT user_id, nombre, username, chat_id FROM sesiones_activas
         WHERE chat_id IS NOT NULL AND pregunta_en IS NULL AND chequeo_en <= NOW();
     """)
     filas = cur.fetchall()
@@ -408,7 +408,7 @@ def _finalizar_pendiente(pid: int, segundos: int = None):
     conn.commit()
     cur.close()
     conn.close()
-    return nombre, final
+    return _etiqueta_texto(nombre, username), final
 
 def _existe_pendiente(pid: int) -> bool:
     conn = _get_conn()
@@ -522,8 +522,19 @@ def _registrar_entrada(user_id: str, nombre: str, username: str, chat_id: int):
 def _esc(texto) -> str:
     return html.escape(str(texto or ""))
 
+def _etiqueta_texto(nombre, username) -> str:
+    """Cómo nombrar a alguien en texto plano: @usuario si tiene, si no su nombre."""
+    return f"@{username}" if username else (nombre or "alguien")
+
+def _mencion_html(user_id, nombre, username) -> str:
+    """Cómo mencionar a alguien en un mensaje HTML. Con @usuario le llega la
+    notificación; si no tiene, se usa un enlace con su nombre (también notifica)."""
+    if username:
+        return f"@{_esc(username)}"
+    return f'<a href="tg://user?id={user_id}">{_esc(nombre or "alguien")}</a>'
+
 # --- CONFIGURACIÓN ---
-ADMIN_IDS = (6905064136)
+ADMIN_IDS = (6905064136,)
 config = {"keyword": "compte", "keyword_salida": "salgo", "reset_mes": None, "reset_anio": None}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -932,19 +943,15 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.exception("Fallo guardando el registro de entrada")
             await _avisar_admins(
                 context,
-                f"No se pudo registrar la entrada de {nombre} (falló la base de datos): {error}"
+                f"No se pudo registrar la entrada de {_etiqueta_texto(nombre, username)} (falló la base de datos): {error}"
             )
             return
         if fue_nueva:
-            await update.message.reply_text(
-                f"✅ <b>{_esc(nombre)}</b>, entrada registrada. Te preguntaré si sigues activa(o) en 2 horas.",
-                parse_mode="HTML"
-            )
             print(f"Registro: {nombre} dijo {config['keyword']}")
         else:
-            hora = inicio.astimezone(ADMIN_TZ).strftime("%H:%M")
+            llevas = int((datetime.now(timezone.utc) - inicio).total_seconds())
             await update.message.reply_text(
-                f"<b>{_esc(nombre)}</b>, ya tenías una sesión activa desde las {hora}. Sigo contando 😉",
+                f"<b>{_esc(nombre)}</b>, ya tienes una sesión activa (llevas {_formatear_duracion(llevas)}). Sigo contando 😉",
                 parse_mode="HTML"
             )
 
@@ -955,7 +962,7 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.exception("Fallo guardando el registro de salida")
             await _avisar_admins(
                 context,
-                f"No se pudo registrar la salida de {nombre} (falló la base de datos): {error}"
+                f"No se pudo registrar la salida de {_etiqueta_texto(nombre, username)} (falló la base de datos): {error}"
             )
             return
         if segundos is not None:
@@ -1018,16 +1025,16 @@ async def decision_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _revisar_sesiones(bot):
     # 1) Preguntar "¿Aún estás ahí?" a quien ya cumplió 2 horas
-    for user_id, nombre, chat_id in await asyncio.to_thread(_sesiones_por_preguntar):
+    for user_id, nombre, username, chat_id in await asyncio.to_thread(_sesiones_por_preguntar):
         msg_id = None
         try:
             teclado = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Sí, sigo aquí", callback_data=f"aqui:{user_id}")
+                InlineKeyboardButton("Sí, sigo aquí", callback_data=f"aqui:{user_id}")
             ]])
             m = await bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f'<a href="tg://user?id={user_id}">{_esc(nombre)}</a>, ¿aún estás ahí? 👀\n'
+                    f'{_mencion_html(user_id, nombre, username)}, ¿aún estás ahí? 👀\n'
                     f"Pulsa el botón en la próxima hora o descontaré ese tiempo de espera."
                 ),
                 parse_mode="HTML",
@@ -1040,12 +1047,12 @@ async def _revisar_sesiones(bot):
 
     # 2) Pasar a "pendiente" las que llevan 1 hora sin respuesta y avisar a los admins
     for v in await asyncio.to_thread(_pasar_vencidas_a_pendiente):
-        etiqueta = f"@{v['username']}" if v["username"] else v["nombre"]
+        etiqueta = _etiqueta_texto(v["nombre"], v["username"])
         if v["chat_id"] and v["msg_id"]:
             try:
                 await bot.edit_message_text(
                     chat_id=v["chat_id"], message_id=v["msg_id"],
-                    text=f"⏰ {v['nombre']} no respondió. Se descontó la hora de espera y un admin definirá su tiempo."
+                    text=f"⏰ {etiqueta} no respondió. Se descontó la hora de espera."
                 )
             except Exception:
                 pass
@@ -1053,8 +1060,9 @@ async def _revisar_sesiones(bot):
             InlineKeyboardButton(f"✅ Guardar {_formatear_duracion(v['segundos'])}", callback_data=f"pok:{v['pid']}"),
             InlineKeyboardButton("✍️ Definir segundos", callback_data=f"pdef:{v['pid']}"),
         ]])
+        sin_user = "" if v["username"] else f" (sin @usuario, ID <code>{v['user_id']}</code>)"
         aviso = (
-            f"⚠️ <b>{_esc(v['nombre'])}</b> ({_esc(etiqueta)}) no respondió al «¿Aún estás ahí?» en 1 hora.\n"
+            f"⚠️ <b>{_esc(etiqueta)}</b>{sin_user} no respondió al «¿Aún estás ahí?» en 1 hora.\n"
             f"Descontando la hora de espera, estuvo activa(o) <b>{_formatear_duracion(v['segundos'])}</b>.\n\n"
             f"¿Qué hago? Si nadie decide en 6 horas, se guarda ese tiempo automáticamente.\n"
             f"ID del pendiente: <code>{v['pid']}</code>"
