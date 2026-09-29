@@ -523,7 +523,7 @@ def _mencion_html(user_id, nombre, username) -> str:
     return f'<a href="tg://user?id={user_id}">{_esc(nombre or "alguien")}</a>'
 
 # --- CONFIGURACIÓN ---
-ADMIN_IDS = (6905064136,)
+ADMIN_IDS = (6905064136,7740467368)
 config = {"keyword": "compte", "keyword_salida": "salgo", "reset_mes": None, "reset_anio": None}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
