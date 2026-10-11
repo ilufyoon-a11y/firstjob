@@ -39,7 +39,7 @@ def run_web():
 Thread(target=run_web, daemon=True).start()
 
 # --- ZONA HORARIA (Ciudad de México, sin horario de verano desde 2022) ---
-ADMIN_TZ = timezone(timedelta(hours=-6))
+ADMIN_TZ = timezone(timedelta(hours=-6))  # México (UTC-6), la zona de la admin
 DIAS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -123,6 +123,8 @@ def _init_db():
     cur.execute("ALTER TABLE sesiones_activas ADD COLUMN IF NOT EXISTS chequeo_en TIMESTAMPTZ;")
     cur.execute("ALTER TABLE sesiones_activas ADD COLUMN IF NOT EXISTS pregunta_en TIMESTAMPTZ;")
     cur.execute("ALTER TABLE sesiones_activas ADD COLUMN IF NOT EXISTS pregunta_msg_id BIGINT;")
+    cur.execute("ALTER TABLE sesiones ADD COLUMN IF NOT EXISTS inicio TIMESTAMPTZ;")
+    cur.execute("ALTER TABLE pendientes ADD COLUMN IF NOT EXISTS inicio TIMESTAMPTZ;")
     conn.commit()
     cur.close()
     conn.close()
@@ -152,11 +154,36 @@ def _cargar_config() -> dict:
         "keyword_salida": filas.get("keyword_salida", "salgo"),
         "reset_mes": filas.get("reset_mes", str(ahora.month)),
         "reset_anio": filas.get("reset_anio", str(ahora.year)),
+        "zona_horas": filas.get("zona_horas"),
     }
     for clave in ("keyword", "keyword_salida", "reset_mes", "reset_anio"):
         if clave not in filas:
             _guardar_config(clave, resultado[clave])
     return resultado
+
+def _repartir_por_dia(inicio, segundos: int, fecha_guardada):
+    """Reparte una sesión entre los días que abarcó, según la zona ADMIN_TZ.
+    Devuelve [(fecha, segundos), ...]. Ej.: 11:30 PM a 1:30 AM -> 30 min el
+    primer día y 1h 30min el siguiente. Las filas viejas, que no guardaron la
+    hora de inicio, se quedan completas en la fecha que ya tenían."""
+    segundos = int(segundos)
+    if inicio is None or segundos <= 0:
+        return [(fecha_guardada, segundos)]
+
+    cursor = inicio.astimezone(ADMIN_TZ)
+    fin = cursor + timedelta(seconds=segundos)
+    partes = []
+    restante = segundos
+    while cursor < fin:
+        medianoche = (cursor + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        if medianoche >= fin:
+            partes.append((cursor.date(), restante))
+            break
+        tramo = int(round((medianoche - cursor).total_seconds()))
+        partes.append((cursor.date(), tramo))
+        restante -= tramo
+        cursor = medianoche
+    return partes
 
 def _sumar_punto(user_id: str, nombre: str, username: str = None):
     conn = _get_conn()
@@ -194,7 +221,7 @@ def _reset_stats():
 def _exportar_backup():
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT user_id, nombre, username, fecha, duracion_segundos FROM sesiones ORDER BY id;")
+    cur.execute("SELECT user_id, nombre, username, fecha, duracion_segundos, inicio FROM sesiones ORDER BY id;")
     sesiones = [
         {
             "user_id": fila[0],
@@ -202,6 +229,7 @@ def _exportar_backup():
             "username": fila[2],
             "fecha": fila[3].isoformat(),
             "duracion_segundos": fila[4],
+            "inicio": fila[5].isoformat() if fila[5] else None,
         }
         for fila in cur.fetchall()
     ]
@@ -221,9 +249,9 @@ def _importar_backup(data: dict) -> tuple:
     cur = conn.cursor()
     for fila in sesiones:
         cur.execute("""
-            INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos)
-            VALUES (%s, %s, %s, %s, %s);
-        """, (fila["user_id"], fila["nombre"], fila.get("username"), fila["fecha"], fila["duracion_segundos"]))
+            INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos, inicio)
+            VALUES (%s, %s, %s, %s, %s, %s);
+        """, (fila["user_id"], fila["nombre"], fila.get("username"), fila["fecha"], fila["duracion_segundos"], fila.get("inicio")))
     for fila in stats:
         cur.execute("""
             INSERT INTO stats (user_id, nombre, username, puntos)
@@ -282,9 +310,9 @@ def _cerrar_sesion(user_id: str, nombre: str, username: str = None):
     fecha_local = inicio.astimezone(ADMIN_TZ).date()
 
     cur.execute("""
-        INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos)
-        VALUES (%s, %s, %s, %s, %s);
-    """, (user_id, nombre, username, fecha_local, duracion_segundos))
+        INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos, inicio)
+        VALUES (%s, %s, %s, %s, %s, %s);
+    """, (user_id, nombre, username, fecha_local, duracion_segundos, inicio))
     conn.commit()
     cur.close()
     conn.close()
@@ -354,9 +382,9 @@ def _pasar_vencidas_a_pendiente():
         segundos = max(0, int((pregunta_en - inicio).total_seconds()))
         fecha = inicio.astimezone(ADMIN_TZ).date()
         cur.execute("""
-            INSERT INTO pendientes (user_id, nombre, username, fecha, segundos_calculados)
-            VALUES (%s, %s, %s, %s, %s) RETURNING id;
-        """, (uid, nombre, username, fecha, segundos))
+            INSERT INTO pendientes (user_id, nombre, username, fecha, segundos_calculados, inicio)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id;
+        """, (uid, nombre, username, fecha, segundos, inicio))
         pid = cur.fetchone()[0]
         vencidas.append({
             "pid": pid, "user_id": uid, "nombre": nombre, "username": username,
@@ -372,7 +400,7 @@ def _finalizar_pendiente(pid: int, segundos: int = None):
     cur = conn.cursor()
     cur.execute("""
         DELETE FROM pendientes WHERE id = %s
-        RETURNING user_id, nombre, username, fecha, segundos_calculados;
+        RETURNING user_id, nombre, username, fecha, segundos_calculados, inicio;
     """, (pid,))
     fila = cur.fetchone()
     if not fila:
@@ -380,12 +408,12 @@ def _finalizar_pendiente(pid: int, segundos: int = None):
         cur.close()
         conn.close()
         return None
-    user_id, nombre, username, fecha, calculados = fila
+    user_id, nombre, username, fecha, calculados, inicio = fila
     final = calculados if segundos is None else max(0, int(segundos))
     cur.execute("""
-        INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos)
-        VALUES (%s, %s, %s, %s, %s);
-    """, (user_id, nombre, username, fecha, final))
+        INSERT INTO sesiones (user_id, nombre, username, fecha, duracion_segundos, inicio)
+        VALUES (%s, %s, %s, %s, %s, %s);
+    """, (user_id, nombre, username, fecha, final, inicio))
     conn.commit()
     cur.close()
     conn.close()
@@ -443,34 +471,57 @@ def _resolver_user_id_por_username(username: str):
     return fila[0] if fila else None
 
 def _obtener_historial_periodo_actual():
+    """Devuelve [(fecha, nombre, username, total_segundos)] con las horas
+    repartidas por día (una sesión que cruza la medianoche se parte en dos)."""
     conn = _get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT fecha, nombre, MAX(username) AS username, SUM(duracion_segundos) AS total
-        FROM sesiones
-        GROUP BY fecha, nombre
-        ORDER BY fecha ASC, total DESC;
-    """)
-    resultados = cur.fetchall()
+    cur.execute("SELECT fecha, nombre, username, duracion_segundos, inicio FROM sesiones;")
+    filas = cur.fetchall()
     cur.close()
     conn.close()
+
+    totales = {}
+    usernames = {}
+    for fecha, nombre, username, segundos, inicio in filas:
+        for dia, seg in _repartir_por_dia(inicio, segundos, fecha):
+            clave = (dia, nombre)
+            totales[clave] = totales.get(clave, 0) + seg
+            if username and (clave not in usernames or username > usernames[clave]):
+                usernames[clave] = username
+
+    resultados = [
+        (dia, nombre, usernames.get((dia, nombre)), total)
+        for (dia, nombre), total in totales.items()
+    ]
+    resultados.sort(key=lambda r: (r[0], -r[3]))
     return resultados
 
 
 def _obtener_historial(user_id: str, dias: int = 14):
+    """Devuelve [(fecha, total_segundos, nombre)] de una persona, del día más
+    reciente al más antiguo, con las horas repartidas por día."""
     conn = _get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT fecha, SUM(duracion_segundos) AS total, MAX(nombre) AS nombre
-        FROM sesiones
-        WHERE user_id = %s AND fecha >= (CURRENT_DATE - %s * INTERVAL '1 day')
-        GROUP BY fecha
-        ORDER BY fecha DESC;
-    """, (user_id, dias))
-    resultados = cur.fetchall()
+        SELECT fecha, nombre, duracion_segundos, inicio
+        FROM sesiones WHERE user_id = %s;
+    """, (user_id,))
+    filas = cur.fetchall()
     cur.close()
     conn.close()
-    return resultados
+
+    desde = datetime.now(ADMIN_TZ).date() - timedelta(days=dias)
+    totales = {}
+    nombres = {}
+    for fecha, nombre, segundos, inicio in filas:
+        for dia, seg in _repartir_por_dia(inicio, segundos, fecha):
+            if dia < desde:
+                continue
+            totales[dia] = totales.get(dia, 0) + seg
+            if nombre and (dia not in nombres or nombre > nombres[dia]):
+                nombres[dia] = nombre
+
+    return [(dia, totales[dia], nombres.get(dia)) for dia in sorted(totales, reverse=True)]
 
 def _sanitizar_texto_pdf(texto: str) -> str:
     if not texto:
@@ -658,9 +709,6 @@ def _generar_pdf_general(filas, mes_titulo: str = None) -> str:
     elementos = [
         Paragraph("Reporte de Actividad", estilo_titulo),
     ]
-    if mes_titulo:
-        elementos.append(Paragraph(mes_titulo, estilo_subtitulo))
-    elementos.append(Spacer(1, 20))
 
     # --- RESUMEN DEL MES ---
     elementos.append(Paragraph("RESUMEN DEL PERIODO", estilo_seccion))
@@ -829,6 +877,34 @@ async def restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_sesiones, total_stats = await asyncio.to_thread(_importar_backup, data)
     await update.message.reply_text(
         f"Base de datos restaurada: {total_sesiones} sesiones y {total_stats} registros de puntos recuperados."
+    )
+
+async def zona(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ADMIN_TZ
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text(" Solo el admin puede cambiar la zona horaria.")
+        return
+
+    actual = int(ADMIN_TZ.utcoffset(None).total_seconds() // 3600)
+    if not context.args:
+        await update.message.reply_text(
+            f" Zona actual: UTC{actual:+d}\nUso: /zona <horas>  (ej. /zona -6 México, /zona -5 Perú)"
+        )
+        return
+
+    try:
+        horas = int(context.args[0])
+        if not -12 <= horas <= 14:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(" Pon un número entero de horas, por ejemplo /zona -6")
+        return
+
+    ADMIN_TZ = timezone(timedelta(hours=horas))
+    config["zona_horas"] = str(horas)
+    await asyncio.to_thread(_guardar_config, "zona_horas", str(horas))
+    await update.message.reply_text(
+        f" Zona horaria cambiada a UTC{horas:+d}. Los reportes de las sesiones nuevas ya usan esta zona."
     )
 
 async def set_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1112,6 +1188,8 @@ if __name__ == '__main__':
     print("🗄️ Verificando base de datos...")
     _init_db()
     config.update(_cargar_config())
+    if config.get("zona_horas") is not None:
+        ADMIN_TZ = timezone(timedelta(hours=int(config["zona_horas"])))
 
     print("🤖 Iniciando bot de Telegram con run_polling...")
     application = (
@@ -1132,6 +1210,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("export", export_cmd))
     application.add_handler(CommandHandler("restore", restore))
     application.add_handler(CommandHandler("setkeyword", set_keyword))
+    application.add_handler(CommandHandler("zona", zona))
     application.add_handler(CommandHandler("trabaja", trabaja))
     application.add_handler(CommandHandler("definir", definir))
 
